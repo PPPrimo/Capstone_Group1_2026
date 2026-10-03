@@ -1,0 +1,123 @@
+#viewer { 
+    /* Style variables (used by canvas rendering logic) */
+    --viewer-padding: 10;               /* padding in CSS px */
+    --hover-scale: 1.2;                 /* hover target scale */
+    --hover-duration-ms: 500;           /* hover anim duration */
+    --dim-sat-final: 55;                /* final saturation % for dim */
+    --dim-bri-final: 88;                /* final brightness % for dim */
+    --alpha-threshold: 10;              /* hit-test alpha threshold */
+
+    width: 95vw; 
+    height: 90vh; 
+    margin: 0 auto; 
+    display: flex; 
+    align-items: center; 
+    justify-content: center; 
+    background: #fff; 
+    position: relative; 
+}
+    
+#assemblyCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    border: 1px solid #eee;
+    border-radius: 8px;
+}
+
+.note {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    background: rgba(255,255,255,0.9);
+    padding: 6px 8px;
+    border-radius: 6px;
+}
+
+
+/* Hover Info Panel */
+#hoverInfo {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 13;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    padding: 10px 12px;
+    min-width: 300px;
+    font: 20px system-ui, Arial, sans-serif;
+    color: #222;
+}
+
+#hoverInfo .title {
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+#hoverInfo .row,
+#packInfo .row,
+#vehicleInfo .row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 2px 0;
+}
+
+#hoverInfo .row.sub {
+    color: #666;
+    font-size: 26px;
+    margin-top: 6px;
+}
+
+/* Vertical value list used by hover, pack, and vehicle panels */
+.val-list {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end; /* right align */
+    gap: 2px;
+    white-space: nowrap;
+    text-align: right;
+}
+
+.val-item {
+    display: block;
+}
+
+
+#hoverInfo .row.sub {
+    color: #666;
+    font-size: 12px;
+    margin-top: 6px;
+}
+
+#packInfo {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 13;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    padding: 10px 12px;
+    min-width: 300px;
+    font: 20px system-ui, Arial, sans-serif;
+    color: #222;
+}
+
+#vehicleInfo {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    z-index: 13;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    padding: 10px 12px;
+    min-width: 300px;
+    font: 20px system-ui, Arial, sans-serif;
+    color: #222;
+}

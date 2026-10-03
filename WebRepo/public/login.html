@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Login</title>
+  <link rel="stylesheet" href="./assets/login.css?v=20251223" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Sign In</h1>
+      <p>Enter your credentials to continue.</p>
+      <form id="loginForm" method="post" action="/auth/jwt/login">
+        <label for="username">Email</label>
+        <input id="username" name="username" type="text" autocomplete="username" required />
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+        <div class="actions">
+          <button type="submit">Login</button>
+        </div>
+        <div id="error" class="error">Invalid username or password.</div>
+      </form>
+    </div>
+  </div>
+  <script src="./src/login.js?v=20251223"></script>
+</body>
+</html>

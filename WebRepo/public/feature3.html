@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>System Status</title>
+  <link rel="stylesheet" href="./assets/base.css?v=20251214" />
+  <link rel="stylesheet" href="./assets/feature3.css?v=20260216" />
+</head>
+<body class="fit-viewport">
+  <section id="feature3" class="panel fit-section">
+    <!-- Row 1: CPU & GPU Usage -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">CPU Usage</div>
+        <div class="stat-bar-track"><div id="barCpu" class="stat-bar"></div></div>
+        <div class="stat-value" id="valCpu">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">GPU Usage <span id="gpuName" class="stat-sub"></span></div>
+        <div class="stat-bar-track"><div id="barGpu" class="stat-bar"></div></div>
+        <div class="stat-value" id="valGpu">—</div>
+      </div>
+    </div>
+
+    <!-- Row 2: CPU & GPU Temp -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">CPU Temp</div>
+        <div class="stat-value stat-value-lg" id="valCpuTemp">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">GPU Temp</div>
+        <div class="stat-value stat-value-lg" id="valGpuTemp">—</div>
+      </div>
+    </div>
+
+    <!-- Row 3: RAM & VRAM -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">RAM Usage</div>
+        <div class="stat-bar-track"><div id="barRam" class="stat-bar"></div></div>
+        <div class="stat-value" id="valRam">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">VRAM Usage</div>
+        <div class="stat-bar-track"><div id="barVram" class="stat-bar"></div></div>
+        <div class="stat-value" id="valVram">—</div>
+      </div>
+    </div>
+
+    <!-- Row 4: Title + Disks -->
+    <div class="stats-row-title-disk">
+      <h2 class="stats-title">System Status <span id="statusDot" class="dot dot-waiting"></span></h2>
+      <div id="diskGrid" class="stats-row stats-row-wrap"></div>
+    </div>
+
+    <!-- History Section -->
+    <div class="history-section">
+      <div class="history-header">
+        <button id="btnToggleHistory" class="btn-history">Show History</button>
+        <button id="btnClearHistory" class="btn-history btn-history-clear">Clear History</button>
+        <div id="rangeWrap" class="range-wrap" style="display:none">
+          <label for="rangeSlider" class="range-label" id="rangeLabel">All</label>
+          <input id="rangeSlider" type="range" min="0" max="8" value="8" class="range-slider" />
+        </div>
+        <span id="historyInfo" class="history-info"></span>
+      </div>
+      <div id="chartsWrap" class="charts-wrap" style="display:none"></div>
+    </div>
+
+    <p id="statsError" class="stats-error" style="display:none"></p>
+  </section>
+
+  <script>
+    (function () {
+      const POLL_MS = 2000;
+      const HISTORY_RESYNC_MS = 60_000; // full re-fetch from server every 60 s to stay in sync
+      let _cachedHistory = [];
+      let _lastHistoryFetch = 0;
+
+      /* ── DOM refs ── */
+      const section  = document.getElementById('feature3');
+      const dot       = document.getElementById('statusDot');
+      const barCpu    = document.getElementById('barCpu');
+      const barRam    = document.getElementById('barRam');
+      const barGpu    = document.getElementById('barGpu');
+      const barVram   = document.getElementById('barVram');
+      const valCpu    = document.getElementById('valCpu');
+      const valRam    = document.getElementById('valRam');
+      const valGpu    = document.getElementById('valGpu');
+      const valVram   = document.getElementById('valVram');
+      const valCpuT   = document.getElementById('valCpuTemp');
+      const valGpuT   = document.getElementById('valGpuTemp');
+      const gpuName   = document.getElementById('gpuName');
+      const diskGrid  = document.getElementById('diskGrid');
+      const errBox    = document.getElementById('statsError');
+
+      const btnToggle   = document.getElementById('btnToggleHistory');
+      const btnClear    = document.getElementById('btnClearHistory');
+      const chartsWrap  = document.getElementById('chartsWrap');
+      const hInfo       = document.getElementById('historyInfo');
+      const rangeWrap   = document.getElementById('rangeWrap');
+      const rangeSlider = document.getElementById('rangeSlider');
+      const rangeLabel  = document.getElementById('rangeLabel');
+
+      /* Time-range presets (in ms); last entry = show all */
+      const RANGE_PRESETS = [
+        { label: '5 min',  ms: 5 * 60000 },
+        { label: '15 min', ms: 15 * 60000 },
+        { label: '30 min', ms: 30 * 60000 },
+        { label: '1 hr',   ms: 60 * 60000 },
+        { label: '2 hr',   ms: 2 * 3600000 },
+        { label: '6 hr',   ms: 6 * 3600000 },
+        { label: '12 hr',  ms: 12 * 3600000 },
+        { label: '24 hr',  ms: 24 * 3600000 },
+        { label: 'All',    ms: Infinity },
+      ];
+      function filterHistory(hist) {
+        const preset = RANGE_PRESETS[parseInt(rangeSlider.value, 10)] || RANGE_PRESETS[3];
+        rangeLabel.textContent = preset.label;
+        if (!hist.length || preset.ms === Infinity) return hist;
+        const cutoff = Date.now() - preset.ms;
+        return hist.filter(e => e.t >= cutoff);
+      }
+
+      let chartVisible = false;
+      // Track disk card elements keyed by mountpoint
+      let diskCardEls = {};
+      // Set of currently visible disk mountpoints (e.g. 'C:\\')
+      let activeDiskMounts = new Set();
+
+      /* ── Helpers ── */
+      function setBar(el, v) {
+        el.style.width = (v != null ? v : 0) + '%';
+        el.classList.toggle('bar-warn', v >= 60 && v < 85);
+        el.classList.toggle('bar-crit', v >= 85);
+      }
+      function tempStr(v) {
+        if (v == null) return 'N/A';
+        return v.toFixed(1) + ' °C';
+      }
+
+      /* ── History (server-side JSON file) ── */
+      async function fetchAndCacheHistory() {
+        const res = await fetch('/api/system-history', { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        // Server deque is ascending; sort defensively
+        _cachedHistory = Array.isArray(data) ? data.sort((a, b) => a.t - b.t) : [];
+        return _cachedHistory;
+      }
+
+      /* Convert a live /api/system-stats response into the compact history entry format */
+      function statsToEntry(d) {
+        const entry = {
+          t: Date.now(),
+          cpu: d.cpu_percent,
+          ram: d.ram_percent,
+          ramU: d.ram_used_gb,
+          ramT: d.ram_total_gb,
+          gpu: d.gpu_percent,
+          vram: d.vram_percent,
+          cpuT: d.cpu_temp_c,
+          gpuT: d.gpu_temp_c,
+        };
+        for (const dk of (d.disks || [])) {
+          entry['d_' + dk.mountpoint] = dk.percent;
+        }
+        return entry;
+      }
+      function updateInfo(hist) {
+        if (!hist.length) { hInfo.textContent = ''; return; }
+        const spanMs = hist[hist.length - 1].t - hist[0].t;
+        const hrs = (spanMs / 3600000).toFixed(1);
+        hInfo.textContent = hist.length + ' pts \u00b7 ' + hrs + ' h span';
+      }
+
+      /* ── Chart definitions ── */
+      const CHART_COLORS = {
+        cpu:  { line: '#007aff', fill: 'rgba(0,122,255,0.10)' },
+        ram:  { line: '#34c759', fill: 'rgba(52,199,89,0.10)' },
+        gpu:  { line: '#af52de', fill: 'rgba(175,82,222,0.10)' },
+        vram: { line: '#ff6482', fill: 'rgba(255,100,130,0.10)' },
+        cpuT: { line: '#ff3b30', fill: 'rgba(255,59,48,0.10)' },
+        gpuT: { line: '#ff9500', fill: 'rgba(255,149,0,0.10)' },
+        disk: { line: '#5856d6', fill: 'rgba(88,86,214,0.10)' },
+      };
+
+      // Returns chart layout as rows of [left, right?] pairs, matching the stat card layout
+      function buildChartRows(hist) {
+        if (!hist.length) return [];
+        const last = hist[hist.length - 1];
+        const rows = [];
+
+        // Row 1: CPU Usage + GPU Usage
+        const cpuCfg = { key: 'cpu', label: 'CPU Usage %', yMax: 100, unit: '%', color: CHART_COLORS.cpu, getValue: e => e.cpu };
+        const gpuCfg = last.gpu != null
+          ? { key: 'gpu', label: 'GPU Usage %', yMax: 100, unit: '%', color: CHART_COLORS.gpu, getValue: e => e.gpu }
+          : null;
+        rows.push([cpuCfg, gpuCfg]);
+
+        // Row 2: CPU Temp + GPU Temp (always shown)
+        const cpuTCfg = { key: 'cpuT', label: 'CPU Temp °C', yMax: 110, unit: '°C', color: CHART_COLORS.cpuT, getValue: e => e.cpuT };
+        const gpuTCfg = { key: 'gpuT', label: 'GPU Temp °C', yMax: 110, unit: '°C', color: CHART_COLORS.gpuT, getValue: e => e.gpuT };
+        rows.push([cpuTCfg, gpuTCfg]);
+
+        // Row 3: RAM + VRAM
+        const ramCfg = { key: 'ram', label: 'RAM Usage %', yMax: 100, unit: '%', color: CHART_COLORS.ram, getValue: e => e.ram };
+        const vramCfg = last.vram != null
+          ? { key: 'vram', label: 'VRAM Usage %', yMax: 100, unit: '%', color: CHART_COLORS.vram, getValue: e => e.vram }
+          : null;
+        rows.push([ramCfg, vramCfg]);
+
+        // Row 3+: Disk charts — only for currently mounted disks
+        const diskCfgs = [...activeDiskMounts].sort().map(mp => {
+          const dk = 'd_' + mp;
+          return {
+            key: dk,
+            label: 'Disk ' + mp + ' %',
+            yMax: 100,
+            unit: '%',
+            color: CHART_COLORS.disk,
+            getValue: e => e[dk],
+          };
+        });
+        for (let i = 0; i < diskCfgs.length; i += 2) {
+          rows.push([diskCfgs[i], diskCfgs[i + 1] || null]);
+        }
+
+        return rows;
+      }
+
+      /* ── Generic canvas line chart — delegates to LineChart utility ── */
+      function drawChart(container, hist, cfg, chartH) {
+        new LineChart(container, {
+          data:   hist.map(e => ({ x: e.t, y: cfg.getValue(e) })),
+          yLabel: cfg.label,
+          yMax:   cfg.yMax,
+          yUnit:  cfg.unit,
+          color:  cfg.color.line,
+          fill:   cfg.color.fill,
+          height: chartH,
+        });
+      }
+
+      /* ── Build / redraw all charts in rows ── */
+      function renderAllCharts(hist) {
+        const rows = buildChartRows(hist);
+        chartsWrap.innerHTML = '';
+        if (!rows.length) {
+          chartsWrap.innerHTML = '<p style="color:#888;font-size:0.88rem;padding:16px 4px;margin:0">No history yet — data will appear here after the server has been running for a few seconds.</p>';
+          return;
+        }
+
+        const viewH     = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        const topOffset = chartsWrap.getBoundingClientRect().top;
+        const chartH    = Math.max(48, Math.floor((viewH - topOffset - (rows.length - 1) * 14 - rows.length * 2 - 8) / rows.length));
+
+        for (const [leftCfg, rightCfg] of rows) {
+          const row = document.createElement('div');
+          row.className = 'charts-row';
+          chartsWrap.appendChild(row);
+
+          if (leftCfg) {
+            const box = document.createElement('div');
+            box.className = 'chart-box';
+            row.appendChild(box);
+            drawChart(box, hist, leftCfg, chartH);
+          } else {
+            row.appendChild(document.createElement('div'));
+          }
+
+          if (rightCfg) {
+            const box = document.createElement('div');
+            box.className = 'chart-box';
+            row.appendChild(box);
+            drawChart(box, hist, rightCfg, chartH);
+          } else {
+            row.appendChild(document.createElement('div'));
+          }
+        }
+      }
+
+      /* ── Dynamic disk cards ── */
+      function updateDiskCards(disks) {
+        if (!disks || !disks.length) {
+          // All disks gone — clear everything
+          for (const mp of Object.keys(diskCardEls)) {
+            diskCardEls[mp].card.remove();
+            delete diskCardEls[mp];
+          }
+          activeDiskMounts.clear();
+          return;
+        }
+        const seen = new Set();
+        for (const dk of disks) {
+          seen.add(dk.mountpoint);
+          let els = diskCardEls[dk.mountpoint];
+          if (!els) {
+            const card = document.createElement('div');
+            card.className = 'stat-card';
+            card.innerHTML =
+              '<div class="stat-label">Disk <span class="stat-sub"></span></div>' +
+              '<div class="stat-bar-track"><div class="stat-bar"></div></div>' +
+              '<div class="stat-value">\u2014</div>';
+            diskGrid.appendChild(card);
+            els = {
+              card: card,
+              label: card.querySelector('.stat-sub'),
+              bar: card.querySelector('.stat-bar'),
+              val: card.querySelector('.stat-value'),
+            };
+            diskCardEls[dk.mountpoint] = els;
+          }
+          els.label.textContent = dk.device + ' (' + dk.mountpoint + ') — ' + dk.fstype;
+          setBar(els.bar, dk.percent);
+          els.val.textContent = dk.used_gb.toFixed(1) + ' / ' + dk.total_gb.toFixed(1)
+            + ' GB (' + dk.percent.toFixed(1) + ' %) — ' + dk.free_gb.toFixed(1) + ' GB free';
+        }
+        // Remove cards for disks that disappeared
+        for (const mp of Object.keys(diskCardEls)) {
+          if (!seen.has(mp)) {
+            diskCardEls[mp].card.remove();
+            delete diskCardEls[mp];
+          }
+        }
+        activeDiskMounts = seen;
+      }
+
+      /* ── Toggle / clear ── */
+      btnToggle.addEventListener('click', async function () {
+        chartVisible = !chartVisible;
+        chartsWrap.style.display = chartVisible ? '' : 'none';
+        rangeWrap.style.display = chartVisible ? '' : 'none';
+        btnToggle.textContent = chartVisible ? 'Hide History' : 'Show History';
+        section.classList.toggle('compact', chartVisible);
+        if (chartVisible) {
+          try {
+            hInfo.textContent = 'Loading\u2026';
+            await fetchAndCacheHistory();
+            _lastHistoryFetch = Date.now();
+          } catch (_) { /* use whatever is cached */ }
+          const fh = filterHistory(_cachedHistory);
+          updateInfo(fh);
+          renderAllCharts(fh);
+        }
+      });
+      rangeSlider.addEventListener('input', function () {
+        if (!chartVisible) return;
+        const fh = filterHistory(_cachedHistory);
+        updateInfo(fh);
+        renderAllCharts(fh);
+      });
+
+      btnClear.addEventListener('click', async function () {
+        if (!confirm('Clear all stats history? This cannot be undone.')) return;
+        try {
+          const res = await fetch('/api/system-history', {
+            method: 'DELETE',
+            credentials: 'same-origin',
+          });
+          if (res.status === 401 || res.status === 403) {
+            alert('Admin access required.');
+            return;
+          }
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          _cachedHistory = [];
+          _lastHistoryFetch = 0; // force full re-sync on next poll
+          hInfo.textContent = 'History cleared.';
+          if (chartVisible) renderAllCharts([]);
+        } catch (e) {
+          alert('Failed to clear history: ' + e.message);
+        }
+      });
+
+      /* ── Poll ── */
+      async function poll() {
+        try {
+          const res = await fetch('/api/system-stats', { credentials: 'same-origin' });
+          if (res.status === 401 || res.status === 403) {
+            errBox.textContent = 'Admin access required.';
+            errBox.style.display = '';
+            return;
+          }
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const d = await res.json();
+
+          // Skip UI updates when the tab is not visible
+          if (document.hidden) return;
+
+          errBox.style.display = 'none';
+          dot.className = 'dot dot-ok';
+
+          setBar(barCpu, d.cpu_percent);
+          valCpu.textContent = d.cpu_percent != null ? d.cpu_percent.toFixed(1) + ' %' : 'N/A';
+
+          setBar(barRam, d.ram_percent);
+          valRam.textContent = d.ram_percent != null
+            ? d.ram_used_gb.toFixed(1) + ' / ' + d.ram_total_gb.toFixed(1) + ' GB (' + d.ram_percent.toFixed(1) + ' %)'
+            : 'N/A';
+
+          setBar(barGpu, d.gpu_percent);
+          valGpu.textContent = d.gpu_percent != null ? d.gpu_percent.toFixed(1) + ' %' : 'N/A';
+          gpuName.textContent = d.gpu_name ? '(' + d.gpu_name + ')' : '';
+
+          setBar(barVram, d.vram_percent);
+          if (d.vram_percent != null) {
+            const usedGb = (d.vram_used_mb / 1024).toFixed(1);
+            const totalGb = (d.vram_total_mb / 1024).toFixed(1);
+            valVram.textContent = usedGb + ' / ' + totalGb + ' GB (' + d.vram_percent.toFixed(1) + ' %)';
+          } else {
+            valVram.textContent = 'N/A';
+          }
+
+          valCpuT.textContent = tempStr(d.cpu_temp_c);
+          valGpuT.textContent = tempStr(d.gpu_temp_c);
+
+          // Dynamic disk cards
+          updateDiskCards(d.disks);
+
+          // Append live point to local history cache for real-time chart updates
+          if (chartVisible) {
+            _cachedHistory.push(statsToEntry(d));
+            // Full server re-sync every 60 s (picks up history from before page load)
+            if (Date.now() - _lastHistoryFetch >= HISTORY_RESYNC_MS) {
+              try {
+                await fetchAndCacheHistory();
+                _lastHistoryFetch = Date.now();
+              } catch (_) { /* keep local data */ }
+            }
+            const fh = filterHistory(_cachedHistory);
+            updateInfo(fh);
+            renderAllCharts(fh);
+          }
+        } catch (e) {
+          if (!document.hidden) {
+            dot.className = 'dot dot-err';
+            errBox.textContent = 'Failed to fetch stats: ' + e.message;
+            errBox.style.display = '';
+          }
+        }
+      }
+
+      // Refresh UI immediately when tab becomes visible again
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) poll();
+      });
+
+      function onResize() {
+        if (chartVisible) renderAllCharts(filterHistory(_cachedHistory));
+      }
+      window.addEventListener('resize', onResize);
+      if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
+
+      poll();
+      setInterval(poll, POLL_MS);
+    })();
+  </script>
+  <script src="./assets/linechart.js"></script>
+  <script src="./assets/read_only.js?v=20251222"></script>
+</body>
+</html>

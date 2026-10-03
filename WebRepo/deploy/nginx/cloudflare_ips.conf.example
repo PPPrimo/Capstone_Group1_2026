@@ -1,0 +1,12 @@
+# Cloudflare IP ranges for real client IP restoration.
+#
+# On the Linux server, copy this file to `cloudflare_ips.conf` and replace
+# the contents with Cloudflare's current IP ranges:
+# https://www.cloudflare.com/ips/
+#
+# Example format:
+#   set_real_ip_from 173.245.48.0/20;
+#   set_real_ip_from 103.21.244.0/22;
+#   ...
+#   set_real_ip_from 2400:cb00::/32;
+#   ...

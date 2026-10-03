@@ -1,0 +1,55 @@
+# --- Secrets / credentials (DO NOT COMMIT) ---
+server/.htpasswd
+server/.session_secret
+
+# Sensitive folder: keep folder only, ignore all contents
+server/sensitive/*
+!server/sensitive/.gitkeep
+
+# TLS keys/certs generated for dev (mkcert/self-signed)
+Resources/ssl/*.key
+Resources/ssl/*.crt
+Resources/ssl/*.pem
+Resources/ssl/*.pfx
+Resources/ssl/*.p12
+
+# --- Runtime logs / PIDs ---
+server/nginx/logs/
+server/nginx/temp/
+server/nginx/*.pid
+*.log
+
+# --- Python artifacts ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.temp
+
+# Virtual environments
+WebRepoVEne/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+
+# --- Node / front-end caches (if added later) ---
+node_modules/
+
+# --- Deployment local overrides (do not commit) ---
+deploy/nginx/cloudflare_ips.conf
+dev_local/
+Resources/ssl/.
+
+# --- Non-runtime artifacts (keep local, don't commit) ---
+*.psd
+*.docx
+
+# Nginx distribution extras (not needed to run this project)
+server/nginx/docs/
+server/nginx/contrib/
+
+#pack assembly details
+Resources/PackAssembly
+

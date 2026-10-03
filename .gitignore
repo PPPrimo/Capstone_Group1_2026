@@ -1,0 +1,19 @@
+# Ignore vendored / external repos
+/ReferencedRepo/
+
+# Ignore local Python virtual environment folder (this workspace has a venv in Capstone/)
+/Capstone/
+/.venv/
+/.vscode/
+/ResearchFiles
+/3DPrintFiles/stl
+/3DPrintFiles/old files
+/lerobot - legacy
+# Optional: common Python/OS noise (kept minimal)
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+capstone.log
+
+

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Feature 1</title>
+  <link rel="stylesheet" href="./assets/base.css?v=20251214" />
+  <link rel="stylesheet" href="./assets/feature1.css" />
+</head>
+<body>
+  <section id="feature1" class="panel">
+    <div id="feature1_top_bar">
+      <select id="tbt">
+          <option value="Control_Through_Server">Control through server</option>
+          <option value="Direct_Control">Direct control (TBD)</option>
+      </select>
+      <div id = "liveData">
+        Live data (WebSocket): Waiting for data...
+      </div>
+    </div>
+
+    <!-- Main content region -->
+    <div id="feature1_middle">
+
+      <div id="feature1_middle_left">
+        Left content
+      </div>
+
+      <div id="feature1_middle_middle">
+
+        <div class="video-container">
+          <video
+            id="remoteVideo"
+            autoplay
+            playsinline
+            muted
+            controls
+          ></video>
+        </div>
+
+      </div>
+
+      <div id="feature1_middle_right">
+        Right content
+      </div>
+
+    </div>
+
+    <!-- Bottom bar -->
+    <div id="feature_1_bottom">
+      Bottom information goes here
+    </div>
+
+  </section>
+  <script type="module" src="./src/live_webrtc.js?v=20260519"></script>
+  <script src="./assets/read_only.js?v=20251222"></script>
+</body>
+</html>

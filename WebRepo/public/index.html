@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Website</title>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+        "three/examples/jsm/controls/OrbitControls.js": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/controls/OrbitControls.js",
+        "three/examples/jsm/loaders/STLLoader.js": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/loaders/STLLoader.js"
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="./assets/base.css?v=20251214" />
+</head>
+<body>
+  <header>
+    <div>TeleBot Cloud - V0-0-3</div>
+    <div class="tabs">
+      <div class="tab" data-tab="feature1">Feature 1</div>
+      <div class="tab" data-tab="feature2">Feature 2</div>
+      <div class="tab" data-tab="feature3">Feature 3</div>
+    </div>
+    <a class="logout" href="/api/logout" title="Sign out">Logout</a>
+  </header>
+
+  <main class="content">
+    <iframe id="panelFrame"></iframe>
+  </main>
+
+  <script type="module" src="./src/main.js?v=20251214"></script>
+  <script src="./assets/read_only.js?v=20251222"></script>
+</body>
+</html>
