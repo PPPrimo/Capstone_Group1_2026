@@ -19,7 +19,7 @@ from server.auth import auth_backend, cookie_transport, current_active_user, cur
 from server.db import create_db_and_tables, get_async_session
 from server.models import User
 from server.server_status import server_status_router, stats_collector_task, persist_stats_history, stats_startup, stats_shutdown
-# from server.webRTC.signaling import webRTC_router
+from server.webRTC.signaling import webRTC_router
 
 WORKSPACE_DIR = Path(__file__).resolve().parent.parent
 PUBLIC_DIR = WORKSPACE_DIR / "public"

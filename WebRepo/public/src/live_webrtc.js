@@ -22,7 +22,7 @@
         let video = document.getElementById('remoteVideo');
 
         function enabled() { //reviewed
-            if (toggle.value !== 'Control_Through_Server') return false;
+            if (!['Control_Through_Server', 'Direct_Control'].includes(toggle.value)) return false;
             if (paused) return false;
             if (authBlocked) return false;
             return true;
@@ -119,7 +119,7 @@
             setText(JSON.stringify(output, null, 2));
         }
 
-        function setupChannel(s, channel) { //reviewed
+        function setupChannel(s, channel) {
             channel.binaryType = 'arraybuffer';
             channel.onopen = () => { if (current(s)) setText('DataChannel open. Waiting for data...')};
             channel.onmessage = (event) => {showMessage(s, event.data).catch(
@@ -138,8 +138,8 @@
                     detail: error?.errorDetail,
                     sctpCauseCode: error?.sctpCauseCode,
                     channelState: channel.readyState,
-                    connectionState: pc.connectionState,
-                    iceState: pc.iceConnectionState,
+                    connectionState: s.pc.connectionState,
+                    iceState: s.pc.iceConnectionState,
                 });
 
                 fail(s, `DataChannel failed: ${error?.message || error?.errorDetail || "unknown reason"}`);
@@ -164,7 +164,7 @@
             track.addEventListener('ended', () => fail(s, 'Robot video ended.'), { once: true });
         }
 
-        async function connect() {  //reviewed
+        async function connect() {
             if (!enabled() || session) return;
             if (!CONFIG.robotName || !CONFIG.robotRole) {
                 setText('Configure robotName and robotRole before connecting.');
@@ -173,6 +173,7 @@
 
             const s = {
                 pc: null,
+                mode: toggle.value,
                 ws: null,
                 abort: new AbortController(),
                 stream: new MediaStream(),
@@ -221,7 +222,7 @@
                 deadline(s, 40000, 'Signaling timed out.');
                 ws.onopen = () => {
                     if (!current(s)) { ws.close(); return; }
-                    ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp, request_id: requestId }));
+                    ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp, request_id: requestId, direct_control: s.mode === 'Direct_Control', robot_name: CONFIG.robotName, robot_role: CONFIG.robotRole }));
                     setText('Offer sent. Waiting for server answer...');
                 };
 
@@ -229,7 +230,14 @@
                     if (!current(s)) return;
                     try {
                         const msg = JSON.parse(event.data);
-                        if (msg.type === 'error') throw new Error(msg.error || 'Server rejected the offer');
+                        if (msg.type === 'error') {
+                            if (msg.retryable === false) {
+                                stopSession();
+                                setText(msg.error || 'Server rejected the offer');
+                                return;
+                            }
+                            throw new Error(msg.error || 'Server rejected the offer');
+                        }
                         if (msg.type !== 'answer' || typeof msg.sdp !== 'string') throw new Error('Invalid server answer');
                         if (msg.request_id !== undefined && msg.request_id !== requestId) throw new Error('Answer request ID mismatch');
                         if (s.answerReceived) return;
@@ -262,17 +270,11 @@
             } catch (error) { fail(s, error.message); }
         }
 
-        function handleOtherMode() {
-            // TBD: implement the other control mode here.
-            setText('Selected control mode: implementation TBD.');
-        }
-
-        function syncMode() { //reviewed
-            if (enabled() && session) return;
+        function syncMode() {
+            if (enabled() && session && session.mode === toggle.value) return;
             stopSession();
             reconnectDelay = 500;
-            if (enabled()) connect();
-            else if (!paused && !authBlocked) handleOtherMode();
+            connect();
         }
 
         window.liveWebRTC = {

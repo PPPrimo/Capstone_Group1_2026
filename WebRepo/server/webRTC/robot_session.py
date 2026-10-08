@@ -28,6 +28,7 @@ class RobotSession:
         self.auxiliary_channel: RTCDataChannel | None = None
         self.auxiliary_messages = {}
         self.direct_pending = None
+        self.owns_robot: Callable[[], bool] = lambda: False
         self.client_ctrl = "F"
         self.server_override = False
         self.video_track = None
@@ -95,7 +96,7 @@ class RobotSession:
         is_connected = self.pc.connectionState == "connected"
         control_ready = self.control_channel is not None and self.control_channel.readyState == "open"
         auxiliary_ready = self.auxiliary_channel is not None and self.auxiliary_channel.readyState == "open"
-
+        owns_robot = self.owns_robot()
         if channel == "control":
             channel_ready = control_ready
         elif channel == "auxiliary":
@@ -222,7 +223,7 @@ class RobotSession:
     def send_auxiliary(self, message): #To Be Redesigned
         import json
         channel = self.auxiliary_channel
-        if not self._can_control():
+        if not self._can_control("auxiliary"):
             logger.info(self.logger_start+"can't control")        
             return False
         payload = json.dumps({**message, "server_override": self.server_override}, separators=(",", ":"), allow_nan=False)

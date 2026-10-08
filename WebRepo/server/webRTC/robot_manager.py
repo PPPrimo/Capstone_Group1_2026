@@ -57,7 +57,7 @@ class RobotManager:
             raise RuntimeError("Create the robot session before configuring its role keys")
         robot_session.ready_key = f"rtc:user:ready:{key_id}:{quote(robot_role, safe='')}"
         robot_session.ready_key_value = f"{self.owner_key_value}:{robot_session.session_id}"
-        robot_session.can_control = self.owns_lease
+        robot_session.owns_robot = self.owns_lease
 
     def owns_lease(self): #reviewed
         return not self._closing and bool(self.owner_key_value) and time.monotonic() < self.lease_deadline
