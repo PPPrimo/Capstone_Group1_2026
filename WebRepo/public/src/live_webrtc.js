@@ -5,7 +5,8 @@
     const CONFIG = {
         robotName: 'CapstoneBot',
         robotRole: 'Base',
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        // iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers: []
     };
 
     function init() {

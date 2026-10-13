@@ -395,9 +395,9 @@ class RobotRTC:
 
     def _direct_message(self, state, identifier, **fields): #reviewed
         return {
-            "identifier": identifier, 
-            "negotiation_id": state["id"], 
-            "session_id": state["session_id"], 
+            "ident": identifier, 
+            "ngoID": state["id"], 
+            "sessID": state["session_id"], 
             **fields}
 
     def _receive_auxiliary(self, payload): #reviewed
@@ -464,8 +464,8 @@ class RobotRTC:
                 return
             if identifier == "R_Ack":
                 state["answer_ack"] = True
-            elif identifier == "R_Cnf" and message.get("ClntCtrl") in ("T", "F"):
-                state["status_ack"] = message["client_ctrl"]
+            elif identifier == "R_Cnf" and message.get("clntctrl") in ("T", "F"):
+                state["status_ack"] = message["clntctrl"]
             elif identifier == "R_Cnl":
                 state["cancelled"] = True
             if not state["established"]:
