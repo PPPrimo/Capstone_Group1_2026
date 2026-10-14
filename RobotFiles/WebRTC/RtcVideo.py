@@ -52,18 +52,13 @@ class CameraSource:
             if self._stop.is_set():
                 raise RuntimeError("Previous camera capture is still stopping")
             return self
-        # Fail immediately for missing dependencies instead of retrying forever.
-        if self.backend == "opencv":
-            import cv2
-        else:
-            from picamera2 import Picamera2
         self._stop.clear()
         self._thread = threading.Thread(target=self._capture, name="robot-camera", daemon=True)
         self._thread.start()
         return self
 
     def latest_frame(self):
-        """Return the latest BGR uint8 frame, or None while missing/stale. Do not mutate it."""
+        """Return the latest BGR uint8 frame, or None while missing/stale"""
         with self._lock:
             if self._stop.is_set() or time.monotonic() - self._frame_time > self.stale_after:
                 return None
@@ -75,53 +70,7 @@ class CameraSource:
 
     def _capture(self):
         while not self._stop.is_set():
-            camera = None
-            try:
-                if self.backend == "opencv":
-                    import cv2
-                    camera = cv2.VideoCapture(self.source)
-                    if not camera.isOpened():
-                        raise RuntimeError("Cannot open camera")
-                    camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-                    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-                    camera.set(cv2.CAP_PROP_FPS, self.fps)
-                    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                else:
-                    from picamera2 import Picamera2
-                    camera = Picamera2(camera_num=int(self.source))
-                    config = camera.create_video_configuration(main={"size": (self.width, self.height), "format": "RGB888"}, controls={"FrameRate": self.fps})
-                    camera.configure(config)
-                    camera.start()
-                confirmed = False
-                while not self._stop.is_set():
-                    if self.backend == "opencv":
-                        ok, frame = camera.read()
-                        if not ok:
-                            raise RuntimeError("Camera stopped providing frames")
-                    else:
-                        frame = camera.capture_array("main")  # Picamera2 RGB888 arrays have BGR byte order.
-                    if frame is None or frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3 or frame.size == 0:
-                        raise RuntimeError("Camera returned an invalid BGR frame")
-                    with self._lock:
-                        self._frame, self._frame_time = frame.copy(), time.monotonic()
-                    if not confirmed:
-                        logger.info("Camera confirmed; real video is available")
-                        confirmed = True
-            except Exception as exc:
-                # Do not log the source URL: it may contain camera credentials.
-                logger.warning("Camera unavailable (%s); using blank video", type(exc).__name__)
-            finally:
-                with self._lock:
-                    self._frame = None
-                if camera is not None:
-                    try:
-                        if self.backend == "opencv":
-                            camera.release()
-                        else:
-                            camera.close()
-                    except Exception:
-                        logger.warning("Camera cleanup failed")
-            self._stop.wait(2)
+            ##alex to do
 
     async def close(self):
         self._stop.set()
@@ -150,32 +99,6 @@ class SwitchableVideoTrack(VideoStreamTrack):
         self._blank = np.zeros((height, width, 3), dtype=np.uint8)
         self._start = None
         self._index = 0
-
-    # async def recv(self):
-    #     if self.readyState != "live":
-    #         raise MediaStreamError
-    #     now = time.monotonic()
-    #     if self._start is None:
-    #         self._start = now
-    #     self._index = max(self._index, int((now - self._start) * self.fps))
-    #     await asyncio.sleep(max(0, self._start + self._index / self.fps - now))
-    #     if self.readyState != "live":
-    #         raise MediaStreamError
-    #     try:
-    #         image = self.source.latest_frame() if self.source is not None else None
-    #         placeholder = image is None
-    #         frame = VideoFrame.from_ndarray(self._blank if placeholder else image, format="bgr24")
-    #         frame = frame.reformat(width=self.width, height=self.height, format="yuv420p")
-    #     except Exception:
-    #         placeholder = True
-    #         frame = VideoFrame.from_ndarray(self._blank, format="bgr24").reformat(format="yuv420p")
-    #     if placeholder != self.using_placeholder:
-    #         logger.info("RTC video switched to %s", "blank frames" if placeholder else "camera")
-    #     self.using_placeholder = placeholder
-    #     frame.pts = round(self._index * 90000 / self.fps)
-    #     frame.time_base = Fraction(1, 90000)
-    #     self._index += 1
-    #     return frame
 
     async def recv(self):
         if self.readyState != "live":
@@ -222,9 +145,10 @@ class SwitchableVideoTrack(VideoStreamTrack):
 async def main():
     from rtc_connection import RobotRTC
     camera = CameraSource().start()
-    rtc = RobotRTC(video_source=camera)
+    rtc = RobotRTC(video_source=None)
     try:
         await rtc.connect()
+        rtc.set_video_source(camera)
         while True:
             command = await rtc.receive_control()
             logger.info("Received control: %r", command)  # Replace with your application handler.
