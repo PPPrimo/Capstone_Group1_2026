@@ -70,7 +70,7 @@ class CameraSource:
 
     def _capture(self):
         while not self._stop.is_set():
-            ##alex to do
+            return None
 
     async def close(self):
         self._stop.set()
@@ -108,26 +108,37 @@ class SwitchableVideoTrack(VideoStreamTrack):
         if self._start is None:
             self._start = now
 
-        self._index = max(self._index, int((now - self._start) * self.fps))
-        await asyncio.sleep(max(0, self._start + self._index / self.fps - now))
+        self._index = max(
+            self._index,
+            int((now - self._start) * self.fps),
+        )
+        await asyncio.sleep(
+            max(0, self._start + self._index / self.fps - now)
+        )
 
         if self.readyState != "live":
             raise MediaStreamError
 
-        # Render the time after waiting, as close as possible to sending the frame.
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        image = self._blank.copy()
-
-        cv2.putText(
-            image,
-            timestamp,
-            (20, self.height // 2),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (255, 255, 255),  # White in BGR
-            2,
-            cv2.LINE_AA,
+        image = (
+            self.source.latest_frame()
+            if self.source is not None
+            else None
         )
+
+        # Show the timestamp when no fresh camera frame is available.
+        if image is None:
+            image = self._blank.copy()
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            cv2.putText(
+                image,
+                timestamp,
+                (20, self.height // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
         frame = VideoFrame.from_ndarray(image, format="bgr24")
         frame = frame.reformat(
@@ -140,26 +151,19 @@ class SwitchableVideoTrack(VideoStreamTrack):
 
         self._index += 1
         return frame
-
-
-async def main():
-    from rtc_connection import RobotRTC
+'''
+example usage:
     camera = CameraSource().start()
+    rtc = RobotRTC(video_source=camera)
+    await rtc.connect()
+or add video later:
     rtc = RobotRTC(video_source=None)
-    try:
-        await rtc.connect()
-        rtc.set_video_source(camera)
-        while True:
-            command = await rtc.receive_control()
-            logger.info("Received control: %r", command)  # Replace with your application handler.
-    finally:
-        await rtc.close()
-        await camera.close()
+    camera = CameraSource().start()
+    await rtc.connect()
+    rtc.set_video_source(camera)
+terminate:
+    await rtc.close()
+    await camera.close()
+'''
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
