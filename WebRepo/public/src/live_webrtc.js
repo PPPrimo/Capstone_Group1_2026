@@ -120,7 +120,8 @@
             setText(JSON.stringify(output, null, 2));
         }
 
-        function setupChannel(s, channel) {
+        function setupChannel(s, channel) { //reviewed
+            //use the message recieved, right now it only displays the recieved data
             channel.binaryType = 'arraybuffer';
             channel.onopen = () => { if (current(s)) setText('DataChannel open. Waiting for data...')};
             channel.onmessage = (event) => {showMessage(s, event.data).catch(
@@ -165,7 +166,8 @@
             track.addEventListener('ended', () => fail(s, 'Robot video ended.'), { once: true });
         }
 
-        async function connect() {
+        async function connect() { //reviewed
+            //sends an offer to server and processes the answer
             if (!enabled() || session) return;
             if (!CONFIG.robotName || !CONFIG.robotRole) {
                 setText('Configure robotName and robotRole before connecting.');
@@ -202,7 +204,7 @@
                         setText('RTC connected.');
                     } else if (pc.connectionState === 'disconnected') {
                         setText('RTC interrupted. Waiting for recovery...');
-                        if (!s.disconnectTimer) s.disconnectTimer = setTimeout(() => fail(s, 'RTC recovery timed out.'), 5000);
+                        if (!s.disconnectTimer) s.disconnectTimer = setTimeout(() => fail(s, 'RTC recovery timed out.'), 1000);
                     } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
                         fail(s, 'RTC connection ended.');
                     }
@@ -228,6 +230,7 @@
                 };
 
                 ws.onmessage = async event => {
+                    //process the answer and establish the connection, else timeout or an error has occured
                     if (!current(s)) return;
                     try {
                         const msg = JSON.parse(event.data);
@@ -272,6 +275,7 @@
         }
 
         function syncMode() {
+            //checks connection state and decides if proceeding to connect
             if (enabled() && session && session.mode === toggle.value) return;
             stopSession();
             reconnectDelay = 500;
@@ -290,12 +294,12 @@
 
         toggle.addEventListener('change', syncMode);
         toggle.addEventListener('input', syncMode);
+        window.addEventListener('pageshow', () => { paused = false; syncMode(); });
+        syncMode();
 
         const cleanup = () => { paused = true; stopSession(); };
         window.addEventListener('beforeunload', cleanup);
         window.addEventListener('pagehide', cleanup);
-        window.addEventListener('pageshow', () => { paused = false; syncMode(); });
-        syncMode();
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });

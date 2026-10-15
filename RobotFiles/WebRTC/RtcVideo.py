@@ -70,7 +70,7 @@ class CameraSource:
 
     def _capture(self):
         while not self._stop.is_set():
-            return None
+            return None #should return a numpy.ndarray
 
     async def close(self):
         self._stop.set()
