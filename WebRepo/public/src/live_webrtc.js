@@ -5,8 +5,7 @@
     const CONFIG = {
         robotName: 'CapstoneBot',
         robotRole: 'Base',
-        // iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-        iceServers: []
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] //{ urls: 'stun:stun.l.google.com:19302' }
     };
 
     function init() {
@@ -23,13 +22,14 @@
         let video = document.getElementById('remoteVideo');
 
         function enabled() { //reviewed
-            if (!['Control_Through_Server', 'Direct_Control'].includes(toggle.value)) return false;
             if (paused) return false;
             if (authBlocked) return false;
             return true;
         }
             
-        function current(s) {return session === s && enabled();}
+        function current(s) {
+            return session === s && enabled() && s !== null && session.mode === toggle.value;
+        }
 
         function stopSession() { 
             clearTimeout(reconnectTimer);
@@ -57,7 +57,7 @@
             setText(`${message} Reconnecting...`);
             if (!enabled()) return;
             reconnectTimer = setTimeout(
-                () => {reconnectTimer = null; connect();}, 
+                () => {reconnectTimer = null; connect(s.mode=="Direct_Control");}, 
                 reconnectDelay);
             reconnectDelay = Math.min(reconnectDelay * 2, 4000);
         }
@@ -121,15 +121,16 @@
         }
 
         function setupChannel(s, channel) { //reviewed
-            //use the message recieved, right now it only displays the recieved data
+            //setup the call back functions related to a channel (this is where the recieved data got used, right now it only displays them)
             channel.binaryType = 'arraybuffer';
             channel.onopen = () => { if (current(s)) setText('DataChannel open. Waiting for data...')};
-            channel.onmessage = (event) => {showMessage(s, event.data).catch(
+            channel.onmessage = (event) => {
+                console.log("Received:", channel.label, event.data);
+                showMessage(s, event.data).catch(
                 (error) => {if (current(s)) setText(`Cannot decode received data: ${error.message}`)}
                 )
             };
             channel.onclose = () => fail(s, 'DataChannel closed.');
-            // channel.onerror = () => fail(s, 'DataChannel failed.');
             channel.onerror = (event) => {
                 const error = event.error; // RTCError when the browser provides it
 
@@ -151,10 +152,11 @@
         function attachVideo(s, track) { //reviewed
             if (!current(s) || track.kind !== 'video') return;
             if (!video) {
-                video = getElementById('remoteVideo')
+                video = document.getElementById('remoteVideo')
             }
             if (!video) {
                 fail(s, 'Video stream element does exist in html');
+                return;
             }
 
             video.controls = true;
@@ -166,8 +168,9 @@
             track.addEventListener('ended', () => fail(s, 'Robot video ended.'), { once: true });
         }
 
-        async function connect() { //reviewed
-            //sends an offer to server and processes the answer
+        async function connect(directControl = false) {  //reviewed
+            //creates an offer and recieves an answer, establish the connection in the end
+            const mode = directControl ? 'Direct_Control' : 'Control_Through_Server';
             if (!enabled() || session) return;
             if (!CONFIG.robotName || !CONFIG.robotRole) {
                 setText('Configure robotName and robotRole before connecting.');
@@ -175,8 +178,8 @@
             }
 
             const s = {
+                mode,
                 pc: null,
-                mode: toggle.value,
                 ws: null,
                 abort: new AbortController(),
                 stream: new MediaStream(),
@@ -188,9 +191,10 @@
             try {
                 const pc = s.pc = new RTCPeerConnection({ iceServers: CONFIG.iceServers });
                 pc.addTransceiver('video', { direction: 'recvonly' });
+                //ensures creation of teleop channel
                 s.channel = pc.createDataChannel('teleop', { ordered: false, maxRetransmits: 0 });
                 setupChannel(s, s.channel);
-
+                //also handles additional channel if remote peer's offer contained it
                 pc.ondatachannel = (event) => { if (current(s)) setupChannel(s, event.channel); };
                 pc.ontrack = event => attachVideo(s, event.track);
                 pc.onconnectionstatechange = () => {
@@ -225,23 +229,22 @@
                 deadline(s, 40000, 'Signaling timed out.');
                 ws.onopen = () => {
                     if (!current(s)) { ws.close(); return; }
-                    ws.send(JSON.stringify({ type: 'offer', sdp: pc.localDescription.sdp, request_id: requestId, direct_control: s.mode === 'Direct_Control', robot_name: CONFIG.robotName, robot_role: CONFIG.robotRole }));
+                    ws.send(JSON.stringify({
+                            type: 'offer', 
+                            sdp: pc.localDescription.sdp, 
+                            request_id: requestId,
+                            direct_control: directControl,
+                            robot_name: CONFIG.robotName,
+                            robot_role: CONFIG.robotRole
+                    }));
                     setText('Offer sent. Waiting for server answer...');
                 };
 
                 ws.onmessage = async event => {
-                    //process the answer and establish the connection, else timeout or an error has occured
                     if (!current(s)) return;
                     try {
                         const msg = JSON.parse(event.data);
-                        if (msg.type === 'error') {
-                            if (msg.retryable === false) {
-                                stopSession();
-                                setText(msg.error || 'Server rejected the offer');
-                                return;
-                            }
-                            throw new Error(msg.error || 'Server rejected the offer');
-                        }
+                        if (msg.type === 'error') throw new Error(msg.error || 'Server rejected the offer');
                         if (msg.type !== 'answer' || typeof msg.sdp !== 'string') throw new Error('Invalid server answer');
                         if (msg.request_id !== undefined && msg.request_id !== requestId) throw new Error('Answer request ID mismatch');
                         if (s.answerReceived) return;
@@ -274,12 +277,15 @@
             } catch (error) { fail(s, error.message); }
         }
 
-        function syncMode() {
-            //checks connection state and decides if proceeding to connect
-            if (enabled() && session && session.mode === toggle.value) return;
+        function syncMode() { //reviewed
+            //upon each call, checks for connection state
+            if (current(session)) return; //checks if the existing connection is correct
             stopSession();
             reconnectDelay = 500;
-            connect();
+            if (enabled()) {
+                if (toggle.value === 'Control_Through_Server') connect(false);
+                else connect(true);
+            }
         }
 
         window.liveWebRTC = {

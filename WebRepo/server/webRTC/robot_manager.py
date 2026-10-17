@@ -79,7 +79,8 @@ class RobotManager:
                 robot_role= robot_role,
                 relay=self.relay, 
                 on_disconnect=disconnect_callback, 
-                on_video_lost=video_callback)
+                on_video_lost=video_callback,
+                on_control=partial(self.handle_robot_control, robot_role)) #creates a function on_control(message) equal to calling self.handle_robot_control(robot_role, message)
             robot_session.create_control_channel()
             self.robot_devs[robot_role] = robot_session
             self.configure_redis(self.redis, self.robot_id, robot_role)
@@ -110,6 +111,13 @@ class RobotManager:
             raise
 
 # functional helpers
+    def handle_robot_control(self, robot_role: str, robot: RobotSession, message):
+        if self._closing or self.get_robot_session(robot_role) is not robot:
+            return
+        client = self.get_client_session(robot_role)
+        if client is not None and client.robot is robot:
+            client.send_control(message)
+
     def get_robot_session(self, robot_role: str) -> RobotSession | None: #reviewed
         return self.robot_devs.get(robot_role)
 

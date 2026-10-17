@@ -6,7 +6,6 @@ import os
 import time
 from pathlib import Path
 import traceback
-import logging
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
@@ -23,7 +22,36 @@ from server.webRTC.signaling import webRTC_router
 
 WORKSPACE_DIR = Path(__file__).resolve().parent.parent
 PUBLIC_DIR = WORKSPACE_DIR / "public"
-logging.basicConfig(filename="server/sensitive/log/server.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+## Logger start
+import logging
+from logging.handlers import TimedRotatingFileHandler
+log_path = WORKSPACE_DIR / "server/sensitive/log/server.log"
+log_path.parent.mkdir(parents=True, exist_ok=True)
+
+handler = TimedRotatingFileHandler(
+    filename=log_path,
+    when="M",
+    interval=1,        # New file every minute
+    backupCount=179,   # 179 backups + current file ≈ 3 hours
+    encoding="utf-8",
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[handler],
+    force=True,
+)
+
+class IceLogFilter(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        return not (
+            "Check CandidatePair(" in message
+            or "Could not bind to" in message
+        )
+logging.getLogger("aioice.ice").addFilter(IceLogFilter())
+## Logger end
 
 app = FastAPI()
 app.include_router(server_status_router)

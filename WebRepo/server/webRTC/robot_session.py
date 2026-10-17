@@ -17,7 +17,8 @@ class RobotSession:
         robot_role: str,
         relay: MediaRelay, 
         on_disconnect: Callable[[RobotSession], Awaitable[None]], 
-        on_video_lost=None
+        on_video_lost=None,
+        on_control=None,
         ):
 
         self.robot_id = robot_id
@@ -35,6 +36,8 @@ class RobotSession:
         self.relay = relay
         self.on_disconnect = on_disconnect
         self.on_video_lost = on_video_lost
+        self.on_control = on_control
+        self.last_control_message: str | bytes | None = None
         self.session_id = uuid.uuid4().hex
         self.video_ready = asyncio.Event()
         self._video_changed = asyncio.Event()
@@ -202,11 +205,23 @@ class RobotSession:
             return
 
 # control functions
+    def _receive_control(self, message):
+        if self._closing or not isinstance(message, (str, bytes)):
+            return
+        size = len(message.encode("utf-8")) if isinstance(message, str) else len(message)
+        if size > 16384:
+            return
+        self.last_control_message = message
+        logger.debug("%sreceived robot telemetry (%d bytes)", self.logger_start, size)
+        if self.on_control is not None:
+            self.on_control(self, message)
+
     def create_control_channel(self): #reviewed
         if self._closing:
             raise RuntimeError("Robot session is closing")
         if self.control_channel is None:
             self.control_channel = self.pc.createDataChannel("teleop", ordered=False, maxRetransmits=0)
+            self.control_channel.on("message", self._receive_control)
         if self.auxiliary_channel is None:
             self.auxiliary_channel = self.pc.createDataChannel("auxiliary", ordered=True)
             self.auxiliary_channel.on("message", self._receive_auxiliary)
@@ -328,6 +343,7 @@ class RobotSession:
                 await self.pc.close()
             finally:
                 self.control_channel = None
+                self.last_control_message = None
                 self.auxiliary_channel = None
                 self.direct_pending = None
                 track = self.video_track

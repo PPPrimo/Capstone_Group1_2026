@@ -66,6 +66,21 @@ class ClientSession:
             raise RuntimeError("Close and recreate the client before changing its video source")
         self.robot = robot
 
+    def send_control(self, message: str | bytes) -> bool:
+        """Forward robot telemetry unchanged to this browser."""
+        channel = self.control_channel
+        if self._closing or channel is None or channel.readyState != "open":
+            return False
+        size = len(message.encode("utf-8")) if isinstance(message, str) else len(message)
+        if size > 16384 or channel.bufferedAmount + size > 65536:
+            return False
+        try:
+            channel.send(message)
+            return True
+        except Exception:
+            logger.warning("Could not forward robot telemetry to client %s", self.client_id, exc_info=True)
+            return False
+
     def attach_robot_video(self):
         if self._closing or self.robot is None:
             return False

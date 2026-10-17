@@ -529,7 +529,7 @@ class RobotRTC:
                         state["established"] = True
                         self.auxiliary_messages = {k: v for k, v in self.auxiliary_messages.items() if v.get("negotiation_id") != state["id"]}
                     if state["status_ack"] != "T": #server has not confirmed full connection
-                        self._send_auxiliary(self._direct_message(state, "R_Sts", client_ctrl="T"))
+                        self._send_auxiliary(self._direct_message(state, "R_Sts", clntCtrl="T"))
                 elif state["established"]:
                     disconnected_at = disconnected_at or time.monotonic()
                     if time.monotonic() - disconnected_at >= 5:

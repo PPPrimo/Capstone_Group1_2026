@@ -20,8 +20,6 @@ import logging
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 
 
-
-
 """Global Variables"""
 motorId = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper']
 teleop_device = None
@@ -29,20 +27,44 @@ teleop_device = None
 SERVER_URL = "http://127.0.0.1:8000"
 ROBOT_NAME = "CapstoneBot"
 ROBOT_ROLE = "Base"
-API_KEY = "uapi_01bce6e6b5.ukkEBSUDqVkwC_bF7Pa8OXR_ju1rEj6aq1TDAdvu1I0"
+API_KEY = "uapi_6eae160cc1.e7Tvl37uJmipwBuji6KHd5Bq4JQPhAK_Rb0GinoBcGs"
 
 # SERVER_URL = os.getenv("PUBLISH_URL", "https://primowang.com/").rstrip("/")
 # API_KEY = "uapi_1a5baab4e2.dhNJpYgzzNjNa9uxXBo2rTZOMhEY6TEti8bekJ0QKkA"
 
+## Logger start
+import logging
+from logging.handlers import TimedRotatingFileHandler
+WORKSPACE_DIR = Path(__file__).resolve().parent
+log_path = WORKSPACE_DIR / "local_logs/robot.log"
+log_path.parent.mkdir(parents=True, exist_ok=True)
+
+handler = TimedRotatingFileHandler(
+    filename=log_path,
+    when="M",
+    interval=1,        # New file every minute
+    backupCount=179,   # 179 backups + current file ≈ 3 hours
+    encoding="utf-8",
+)
+
 logging.basicConfig(
-    level=logging.INFO, 
-    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("capstone.log", encoding="utf-8"),
-    ],
-    force=True)
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[handler],
+    force=True,
+)
+
+class IceLogFilter(logging.Filter):
+    def filter(self, record):
+        message = record.getMessage()
+        return not (
+            "Check CandidatePair(" in message
+            or "Could not bind to" in message
+        )
+logging.getLogger("aioice.ice").addFilter(IceLogFilter())
 logger = logging.getLogger(__name__)
+## Logger end
+
 
 payload = None
 payload_lock = threading.Lock()
@@ -95,6 +117,19 @@ def run_follower_local(device):
         sync_states_to_follower(device, states)
         time.sleep(ExcutionPeriod)
 
+async def receive_loop(rtc):
+    while True:
+        control = await rtc.receive_control()
+        logger.info("Received control: %r", control)
+
+
+async def send_loop(rtc):
+    while True:
+        message = {"timestamp": time.time()}
+        send_result = rtc.send_control(message)
+        logger.info(send_result)
+        await asyncio.sleep(0.1)  # Send every 10 ms
+
 async def run_follower():
     rtc = RobotRTC(
         SERVER_URL = SERVER_URL, 
@@ -105,10 +140,12 @@ async def run_follower():
     await rtc.connect()
     print("connected")
     logger.info("RTC connected")
-
-    while True:
-        control = await rtc.receive_control()
-        logger.info("Received control: %r", control)
+    try:
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(receive_loop(rtc))
+            tasks.create_task(send_loop(rtc))
+    finally:
+        await rtc.close()
 
 def main():
     global ExcutionPeriod

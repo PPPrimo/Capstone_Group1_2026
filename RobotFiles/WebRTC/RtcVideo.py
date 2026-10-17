@@ -23,7 +23,7 @@ CAMERA_SOURCE = 0
 CAMERA_BACKEND = "opencv"  # "picamera2" for a Raspberry Pi CSI camera.
 VIDEO_WIDTH = 640
 VIDEO_HEIGHT = 480
-VIDEO_FPS = 20
+VIDEO_FPS = 30
 
 
 class CameraSource:
@@ -129,6 +129,7 @@ class SwitchableVideoTrack(VideoStreamTrack):
         if image is None:
             image = self._blank.copy()
             timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            logger.info(timestamp)
             cv2.putText(
                 image,
                 timestamp,
