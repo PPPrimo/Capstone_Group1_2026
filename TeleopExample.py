@@ -29,8 +29,8 @@ ROBOT_NAME = "CapstoneBot"
 ROBOT_ROLE = "Base"
 API_KEY = "uapi_6eae160cc1.e7Tvl37uJmipwBuji6KHd5Bq4JQPhAK_Rb0GinoBcGs"
 
-# SERVER_URL = os.getenv("PUBLISH_URL", "https://primowang.com/").rstrip("/")
-# API_KEY = "uapi_1a5baab4e2.dhNJpYgzzNjNa9uxXBo2rTZOMhEY6TEti8bekJ0QKkA"
+SERVER_URL = os.getenv("PUBLISH_URL", "https://primowang.com/").rstrip("/")
+API_KEY = "uapi_a5e00f7b89.C-u6qZly-9-1wEBepQR26UyuOzSF8Uig3jw_xGfHPZU"
 
 ## Logger start
 import logging
@@ -50,7 +50,7 @@ handler = TimedRotatingFileHandler(
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    handlers=[handler],
+    handlers=[handler, logging.StreamHandler()],
     force=True,
 )
 
