@@ -136,7 +136,7 @@ async def send_loop(rtc):
             latency_avg_ms = sum(latency_log) / len(latency_log)
         message = {"timestamp": time.time(), "latency_avg_ms": latency_avg_ms}
         send_result = rtc.send_control(message)
-        logger.info(send_result)
+        logger.info("telemetry: %s", json.dumps({**message, "sent": send_result}))
         await asyncio.sleep(0.1)  # Send every 100 ms
 
 async def run_follower():

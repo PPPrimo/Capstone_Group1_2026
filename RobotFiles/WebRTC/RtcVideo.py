@@ -129,7 +129,6 @@ class SwitchableVideoTrack(VideoStreamTrack):
         if image is None:
             image = self._blank.copy()
             timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            logger.info(timestamp)
             cv2.putText(
                 image,
                 timestamp,
