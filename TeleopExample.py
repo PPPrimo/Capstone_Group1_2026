@@ -70,6 +70,8 @@ payload = None
 payload_lock = threading.Lock()
 payload_temp = None
 payload_temp_lock = threading.Lock()
+latency_log = [0.0] * 10
+latency_log_lock = threading.Lock()
 stop_event = threading.Event()
 ExcutionPeriod = 0.01
 """Global Variables End"""
@@ -120,15 +122,22 @@ def run_follower_local(device):
 async def receive_loop(rtc):
     while True:
         control = await rtc.receive_control()
+        control = json.loads(control)
+        latency_ms = (time.time() - control["timestamp"]) * 1000
+        with latency_log_lock:
+            latency_log.pop(0)
+            latency_log.append(latency_ms)
         logger.info("Received control: %r", control)
 
 
 async def send_loop(rtc):
     while True:
-        message = {"timestamp": time.time()}
+        with latency_log_lock:
+            latency_avg_ms = sum(latency_log) / len(latency_log)
+        message = {"timestamp": time.time(), "latency_avg_ms": latency_avg_ms}
         send_result = rtc.send_control(message)
         logger.info(send_result)
-        await asyncio.sleep(0.1)  # Send every 10 ms
+        await asyncio.sleep(0.1)  # Send every 100 ms
 
 async def run_follower():
     rtc = RobotRTC(

@@ -95,9 +95,8 @@
             });
         }
 
-        async function showMessage(s, data) { //reviewed
+        async function showMessage(s, data, channel) { //reviewed
             if (!current(s)) return;
-            const receivedAt = Date.now() / 1000;
             if (data instanceof Blob) data = await data.text();
             else if (data instanceof ArrayBuffer) data = new TextDecoder().decode(data);
             if (!current(s)) return;
@@ -106,18 +105,13 @@
             try { obj = JSON.parse(data); }
             catch { setText(String(data)); return; }
 
-            const output = { data: obj, received_at: receivedAt };
-
-            // Timestamp must be Unix seconds. Clock offset affects this measurement.
             if (obj && typeof obj.timestamp === 'number' && Number.isFinite(obj.timestamp)) {
-                s.latencies.push(receivedAt - obj.timestamp);
-                if (s.latencies.length > 1000) s.latencies.shift();
-                output.AverageLatency = s.latencies.reduce((a, b) => a + b, 0) / s.latencies.length;
-                output.MaximumLatency = Math.max(...s.latencies);
-                output.MinimumLatency = Math.min(...s.latencies);
+                if (channel.readyState === 'open') {
+                    channel.send(JSON.stringify({ timestamp: obj.timestamp }));
+                }
             }
 
-            setText(JSON.stringify(output, null, 2));
+            setText(JSON.stringify(obj, null, 2));
         }
 
         function setupChannel(s, channel) { //reviewed
@@ -126,7 +120,7 @@
             channel.onopen = () => { if (current(s)) setText('DataChannel open. Waiting for data...')};
             channel.onmessage = (event) => {
                 console.log("Received:", channel.label, event.data);
-                showMessage(s, event.data).catch(
+                showMessage(s, event.data, channel).catch(
                 (error) => {if (current(s)) setText(`Cannot decode received data: ${error.message}`)}
                 )
             };
@@ -183,7 +177,6 @@
                 ws: null,
                 abort: new AbortController(),
                 stream: new MediaStream(),
-                latencies: [],
                 answerReceived: false
             };
             session = s;
