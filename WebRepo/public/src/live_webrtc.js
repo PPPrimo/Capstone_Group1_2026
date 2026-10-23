@@ -53,6 +53,7 @@
 
         function fail(s, message) { //reviewed
             if (!current(s)) return;
+            console.error('WebRTC connection failed:', message);
             stopSession();
             setText(`${message} Reconnecting...`);
             if (!enabled()) return;
@@ -90,7 +91,12 @@
 
                 pc.addEventListener('icegatheringstatechange', changed);
                 s.abort.signal.addEventListener('abort', aborted, { once: true });
-                timer = setTimeout(() => finish(new Error('ICE gathering timed out')), 120000);
+                timer = setTimeout(() => {
+                    // Like aiortc, stop waiting for STUN and use available candidates.
+                    const hasCandidates = /^a=candidate:/m.test(pc.localDescription?.sdp || '');
+                    if (hasCandidates) console.warn('ICE gathering incomplete; using available candidates.');
+                    finish(hasCandidates ? undefined : new Error('ICE gathering timed out without candidates'));
+                }, 5000);
                 changed();
             });
         }
@@ -225,7 +231,7 @@
                     }
                 };
 
-                deadline(s, 130000, 'Offer creation timed out.');
+                deadline(s, 20000, 'Offer creation timed out.');
                 setText('Creating offer and gathering ICE candidates...');
                 await pc.setLocalDescription(await pc.createOffer());
                 await waitForIce(s);
