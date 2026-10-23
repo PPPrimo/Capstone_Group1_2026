@@ -438,14 +438,19 @@ class RobotRTC:
                 return
             if identifier == "R_Off": #request to start the offer relay procedure
                 if state is not None:
-                    if (state["session_id"], state["id"]) != key:
+                    if (state["session_id"], state["id"]) == key:
+                        if not state.get("established"):
+                            self._send_auxiliary(self._direct_message(state, "R_Rdy", ready=True))
+                            if state.get("answer") is not None:
+                                self._send_auxiliary(self._direct_message(state, "R_Ans", answer=state["answer"]))
+                        return
+                    channel = state.get("channel")
+                    if (state.get("master_mode") and state.get("pc") is not None
+                            and state["pc"].connectionState == "connected"
+                            and channel is not None and channel.readyState == "open"):
                         error = {"id": negotiation_id, "session_id": session_id}
-                        self._send_auxiliary(self._direct_message(error, "R_Err", error="busy"))
-                    elif not state.get("established"): #informs server of recieved offer and is under processing
-                        self._send_auxiliary(self._direct_message(state, "R_Rdy", ready=True))
-                        if state.get("answer") is not None:
-                            self._send_auxiliary(self._direct_message(state, "R_Ans", answer=state["answer"]))
-                    return
+                        self._send_auxiliary(self._direct_message(error, "R_Err", error="busy: Master mode is enabled"))
+                        return
                 if not self.connected:
                     error = {"id": negotiation_id, "session_id": session_id}
                     self._send_auxiliary(self._direct_message(error, "R_E", error="robot_not_ready"))
@@ -453,7 +458,13 @@ class RobotRTC:
                 offer = message.get("offer")
                 if not isinstance(offer, dict) or offer.get("type") != "offer" or not isinstance(offer.get("sdp"), str) or len(offer["sdp"].encode("utf-8")) > 48000:
                     return
-                state = {"id": negotiation_id, "session_id": session_id, "offer": offer, "changed": asyncio.Event(), "answer_ack": False, "status_ack": None, "cancelled": False, "established": False, "pc": None, "channel": None, "track": None}
+                if state is not None:
+                    state["cancelled"] = True
+                    state["changed"].set()
+                    self._finished_negotiations[(state["session_id"], state["id"])] = time.monotonic()
+                    if self._direct_task is not None:
+                        self._direct_task.cancel()
+                state = {"id": negotiation_id, "session_id": session_id, "offer": offer, "changed": asyncio.Event(), "answer_ack": False, "status_ack": None, "cancelled": False, "established": False, "master_mode": False, "pc": None, "channel": None, "track": None}
                 self._direct = state
                 self.user_command = None
                 self.auxiliary_messages[identifier] = message
@@ -464,8 +475,8 @@ class RobotRTC:
                 return
             if identifier == "R_Ack":
                 state["answer_ack"] = True
-            elif identifier == "R_Cnf" and message.get("clntctrl") in ("T", "F"):
-                state["status_ack"] = message["clntctrl"]
+            elif identifier == "R_Cnf" and message.get("clntCtrl") in ("T", "F"):
+                state["status_ack"] = message["clntCtrl"]
             elif identifier == "R_Cnl":
                 state["cancelled"] = True
             if not state["established"]:
@@ -480,12 +491,18 @@ class RobotRTC:
 
         @pc.on("connectionstatechange")
         def on_state(): #new
-            if pc.connectionState != "connected":
+            if self._direct is state and pc.connectionState != "connected":
                 self.user_command = None
             state["changed"].set()
 
         @pc.on("datachannel")
         def on_channel(channel): #new
+            if self._direct is state and channel.label == "master":
+                @channel.on("message")
+                def on_status(message):
+                    if self._direct is state and not state["cancelled"] and message in ("true", "false"):
+                        state["master_mode"] = message == "true"
+                return
             if self._direct is not state or channel.label != "teleop" or state["channel"] is not None:
                 channel.close()
                 return
@@ -554,14 +571,15 @@ class RobotRTC:
             await pc.close()
             if state["track"] is not None:
                 state["track"].stop()
-            self.user_command = None
+            if self._direct is state:
+                self.user_command = None
             # Announce release until acknowledged; reliable SCTP also preserves ordering.
             if not self._closing and self.connected and not state["cancelled"]:
                 for _ in range(6):
                     if state["status_ack"] == "F":
                         break
                     state["changed"].clear()
-                    self._send_auxiliary(self._direct_message(state, "R_Sts", client_ctrl="F"))
+                    self._send_auxiliary(self._direct_message(state, "R_Sts", clntCtrl="F"))
                     try:
                         await asyncio.wait_for(state["changed"].wait(), 0.5)
                     except TimeoutError:

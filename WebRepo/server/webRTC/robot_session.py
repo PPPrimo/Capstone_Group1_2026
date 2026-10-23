@@ -29,6 +29,7 @@ class RobotSession:
         self.auxiliary_channel: RTCDataChannel | None = None
         self.auxiliary_messages = {}
         self.direct_pending = None
+        self.direct_requests = {}
         self.owns_robot: Callable[[], bool] = lambda: False
         self.client_ctrl = "F"
         self.server_override = False
@@ -156,13 +157,22 @@ class RobotSession:
             message = json.loads(payload)
             if not isinstance(message, dict):
                 return
-            state = self.direct_pending
             identifier = message.get("ident")
+            state = self.direct_requests.get(message.get("ngoID"))
             #duplication check
-            if state is None or message.get("ngoID") != state["id"] or message.get("sessID") != self.session_id:
+            if state is None or state.get("ended") or message.get("sessID") != self.session_id:
                 logger.warning(self.logger_start+"negotiation or session id missmatch")
                 return
             #processing
+            if identifier in ("R_Rdy", "R_Ans") and self.direct_pending is not state:
+                previous = self.direct_pending
+                if previous is not None:
+                    previous["error"] = "Connection replaced by another user"
+                    previous["ended"] = True
+                    previous["changed"].set()
+                    self.direct_requests.pop(previous["id"], None)
+                self.direct_pending = state
+                self.client_ctrl = "F"
             if identifier == "R_Sts":
                 status = message.get("clntCtrl")
                 if status not in ("T", "F"):
@@ -180,12 +190,13 @@ class RobotSession:
                 else:
                     state["error"] = "Direct client disconnected"
                     state["ended"] = True
+                    self.direct_requests.pop(state["id"], None)
                 state["changed"].set()
                 return
             if state["connected"].is_set() or state.get("ended"):
                 logger.info(self.logger_start+"ignored message, negotiation ended or completed")
                 return
-            if identifier == "R_Off" and message.get("ready") is True:
+            if identifier == "R_Rdy" and message.get("ready") is True:
                 state["received"].set()
             elif identifier == "R_Err":
                 state["error"] = str(message.get("error", "Robot rejected negotiation"))
@@ -325,8 +336,7 @@ class RobotSession:
         return self._close_task
 
     async def _close(self): #reviewed
-        state = self.direct_pending
-        if state is not None:
+        for state in self.direct_requests.values():
             state["error"] = "Robot disconnected"
             state["changed"].set()
         self.client_ctrl = "F"
@@ -346,6 +356,7 @@ class RobotSession:
                 self.last_control_message = None
                 self.auxiliary_channel = None
                 self.direct_pending = None
+                self.direct_requests.clear()
                 track = self.video_track
                 self.video_track = None
                 if track is not None:

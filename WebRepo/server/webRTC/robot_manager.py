@@ -232,8 +232,11 @@ class RobotManager:
 
     def _cancel_direct(self, robot, state): #reviewed
         robot.send_auxiliary({"ident": "R_Cnl", "ngoID": state["id"], "sessID": robot.session_id})
+        state["ended"] = True
+        state["error"] = state["error"] or "Direct negotiation ended"
+        state["changed"].set()
+        robot.direct_requests.pop(state["id"], None)
         if robot.direct_pending is state:
-            state["ended"] = True
             robot.direct_pending = None
             robot.client_ctrl = "F"
             robot.auxiliary_messages.clear()
@@ -244,8 +247,6 @@ class RobotManager:
         robot = self.get_robot_session(robot_role)
         if robot is None or not self.owns_lease() or not robot.direct_ready():
             raise RuntimeError("robot_not_ready")
-        if robot.direct_pending is not None and not robot.direct_pending.get("ended"):
-            raise RuntimeError("busy")
         state = {
             "id": request_id, 
             "answer": asyncio.get_running_loop().create_future(), 
@@ -254,8 +255,9 @@ class RobotManager:
             "changed": asyncio.Event(), 
             "error": None
             }
-        robot.direct_pending = state
-        robot.auxiliary_messages.clear()
+        # Keep the existing session until the robot accepts this offer. The robot
+        # owns Master mode state and can reject replacement without disturbing it.
+        robot.direct_requests[request_id] = state
         message = {
             "ident": "R_Off", 
             "ngoID": request_id, 

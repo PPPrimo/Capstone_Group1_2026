@@ -148,6 +148,12 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         };
     }
 
+    function sendMasterMode(s) {
+        if (current(s) && s.masterChannel?.readyState === 'open') {
+            s.masterChannel.send(String(master.checked));
+        }
+    }
+
     function attachVideo(s, track) { //reviewed
         if (!current(s) || track.kind !== 'video') return;
         if (!video) {
@@ -210,6 +216,10 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
             //ensures creation of teleop channel
             s.channel = pc.createDataChannel('teleop', { ordered: false, maxRetransmits: 0 });
             setupChannel(s, s.channel);
+            if (directControl) {
+                s.masterChannel = pc.createDataChannel('master', { ordered: true });
+                s.masterChannel.onopen = () => sendMasterMode(s);
+            }
             //also handles additional channel if remote peer's offer contained it
             pc.ondatachannel = (event) => { if (current(s)) setupChannel(s, event.channel); };
             pc.ontrack = event => attachVideo(s, event.track);
@@ -323,6 +333,7 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
 
     toggle.addEventListener('change', syncMode);
     toggle.addEventListener('input', syncMode);
+    master.addEventListener('change', () => sendMasterMode(session));
     retry.addEventListener('change', () => {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
