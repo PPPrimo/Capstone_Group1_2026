@@ -90,7 +90,7 @@
 
                 pc.addEventListener('icegatheringstatechange', changed);
                 s.abort.signal.addEventListener('abort', aborted, { once: true });
-                timer = setTimeout(() => finish(new Error('ICE gathering timed out')), 15000);
+                timer = setTimeout(() => finish(new Error('ICE gathering timed out')), 120000);
                 changed();
             });
         }
@@ -183,6 +183,24 @@
 
             try {
                 const pc = s.pc = new RTCPeerConnection({ iceServers: CONFIG.iceServers });
+                //debuging messages to find out issues with ICE
+                pc.onicecandidate = event => {
+                    console.log(
+                        "Candidate:",
+                        event.candidate?.candidate ?? "Gathering complete"
+                    );
+                };
+                pc.onicecandidateerror = event => {
+                    console.warn("STUN/TURN error:", {
+                        url: event.url,
+                        code: event.errorCode,
+                        text: event.errorText
+                    });
+                };
+                pc.onicegatheringstatechange = () => {
+                    console.log("Gathering state:", pc.iceGatheringState);
+                };
+                //end
                 pc.addTransceiver('video', { direction: 'recvonly' });
                 //ensures creation of teleop channel
                 s.channel = pc.createDataChannel('teleop', { ordered: false, maxRetransmits: 0 });
@@ -207,7 +225,7 @@
                     }
                 };
 
-                deadline(s, 20000, 'Offer creation timed out.');
+                deadline(s, 130000, 'Offer creation timed out.');
                 setText('Creating offer and gathering ICE candidates...');
                 await pc.setLocalDescription(await pc.createOffer());
                 await waitForIce(s);
