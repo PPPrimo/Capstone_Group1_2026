@@ -1,4 +1,4 @@
-import { initLiveWebRTC } from '/api/webrtc/live_webrtc.js?v=20261023-1';
+import { initLiveWebRTC } from '/api/webrtc/live_webrtc.js?v=20261023-2';
 
 const CONFIG = {
     robotName: 'CapstoneBot',

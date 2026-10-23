@@ -444,13 +444,6 @@ class RobotRTC:
                             if state.get("answer") is not None:
                                 self._send_auxiliary(self._direct_message(state, "R_Ans", answer=state["answer"]))
                         return
-                    channel = state.get("channel")
-                    if (state.get("master_mode") and state.get("pc") is not None
-                            and state["pc"].connectionState == "connected"
-                            and channel is not None and channel.readyState == "open"):
-                        error = {"id": negotiation_id, "session_id": session_id}
-                        self._send_auxiliary(self._direct_message(error, "R_Err", error="busy: Master mode is enabled"))
-                        return
                 if not self.connected:
                     error = {"id": negotiation_id, "session_id": session_id}
                     self._send_auxiliary(self._direct_message(error, "R_E", error="robot_not_ready"))
@@ -464,7 +457,7 @@ class RobotRTC:
                     self._finished_negotiations[(state["session_id"], state["id"])] = time.monotonic()
                     if self._direct_task is not None:
                         self._direct_task.cancel()
-                state = {"id": negotiation_id, "session_id": session_id, "offer": offer, "changed": asyncio.Event(), "answer_ack": False, "status_ack": None, "cancelled": False, "established": False, "master_mode": False, "pc": None, "channel": None, "track": None}
+                state = {"id": negotiation_id, "session_id": session_id, "offer": offer, "changed": asyncio.Event(), "answer_ack": False, "status_ack": None, "cancelled": False, "established": False, "pc": None, "channel": None, "track": None}
                 self._direct = state
                 self.user_command = None
                 self.auxiliary_messages[identifier] = message
@@ -497,12 +490,6 @@ class RobotRTC:
 
         @pc.on("datachannel")
         def on_channel(channel): #new
-            if self._direct is state and channel.label == "master":
-                @channel.on("message")
-                def on_status(message):
-                    if self._direct is state and not state["cancelled"] and message in ("true", "false"):
-                        state["master_mode"] = message == "true"
-                return
             if self._direct is not state or channel.label != "teleop" or state["channel"] is not None:
                 channel.close()
                 return

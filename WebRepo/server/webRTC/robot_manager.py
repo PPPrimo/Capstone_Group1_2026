@@ -255,8 +255,7 @@ class RobotManager:
             "changed": asyncio.Event(), 
             "error": None
             }
-        # Keep the existing session until the robot accepts this offer. The robot
-        # owns Master mode state and can reject replacement without disturbing it.
+        # Keep the existing session until the robot accepts this offer.
         robot.direct_requests[request_id] = state
         message = {
             "ident": "R_Off", 
