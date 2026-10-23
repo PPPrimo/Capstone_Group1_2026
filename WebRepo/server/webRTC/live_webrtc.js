@@ -31,8 +31,7 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         old.abort.abort();
         clearTimeout(old.deadline);
         clearTimeout(old.disconnectTimer);
-        clearInterval(old.latencyTimer);
-        if (latency) latency.textContent = 'Latency: — ms';
+        if (latency) latency.textContent = 'Latency: N/A';
         if (old.ws) {
             old.ws.onclose = null;
             old.ws.onerror = null;
@@ -58,20 +57,6 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
     function deadline(s, milliseconds, message) { //reviewed
         clearTimeout(s.deadline);
         s.deadline = setTimeout(() => fail(s, message), milliseconds);
-    }
-
-    async function updateLatency(s) {
-        try {
-            const stats = await s.pc.getStats();
-            if (!current(s) || !latency) return;
-            let seconds;
-            stats.forEach(report => {
-                if (report.type !== 'transport' || !report.selectedCandidatePairId) return;
-                seconds = stats.get(report.selectedCandidatePairId)?.currentRoundTripTime;
-            });
-            latency.textContent = Number.isFinite(seconds) && seconds >= 0
-                ? `Latency: ${(seconds * 1000).toFixed(2)} ms` : 'Latency: — ms';
-        } catch (error) { console.warn('Cannot read RTC latency:', error.message); }
     }
 
     function waitForIce(s) { //reviewed
@@ -115,7 +100,13 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
 
         let obj;
         try { obj = JSON.parse(data); }
-        catch { setText(String(data)); return; }
+        catch {
+            if (latency) latency.textContent = 'Latency: N/A';
+            setText(String(data)); return;
+        }
+
+        if (latency) latency.textContent = Number.isFinite(obj?.latency_avg_ms) && obj.latency_avg_ms >= 0
+            ? `Latency: ${obj.latency_avg_ms.toFixed(2)} ms` : 'Latency: N/A';
 
         if (obj && typeof obj.timestamp === 'number' && Number.isFinite(obj.timestamp)) {
             if (channel.readyState === 'open') {
@@ -229,9 +220,6 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
                     s.deadline = null;
                     reconnectDelay = 500;
                     retry.checked = false;
-                    clearInterval(s.latencyTimer);
-                    updateLatency(s);
-                    s.latencyTimer = setInterval(() => updateLatency(s), 1000);
                     setText('RTC connected.');
                 } else if (pc.connectionState === 'disconnected') {
                     setText('RTC interrupted. Waiting for recovery...');

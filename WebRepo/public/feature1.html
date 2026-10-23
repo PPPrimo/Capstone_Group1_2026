@@ -20,7 +20,7 @@
       <label class="connection-toggle" title="Enable sending commands to the robot">
         <input id="masterMode" type="checkbox" role="switch" /> Master mode
       </label>
-      <span id="latency" title="Round-trip latency to the connected WebRTC peer">Latency: — ms</span>
+      <span id="latency" title="latency_avg_ms reported by the robot">Latency: N/A</span>
       <div id = "liveData">
         Live data (WebSocket): Waiting for data...
       </div>
@@ -59,7 +59,7 @@
     </div>
 
   </section>
-  <script type="module" src="./src/webrtc_setup.js?v=20261022-3"></script>
+  <script type="module" src="./src/webrtc_setup.js?v=20261022-5"></script>
   <script src="./assets/read_only.js?v=20251222"></script>
 </body>
 </html>
