@@ -2,6 +2,7 @@
 export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, video }) {
     const setText = text => { if (el) el.textContent = text; };
     if (!toggle) { setText('Missing switch #tbt.'); return; }
+    toggle.value = 'None';
     retry.checked = true;
     master.checked = false;
 
@@ -12,6 +13,7 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
     let authBlocked = false;
 
     function enabled() { //reviewed
+        if (toggle.value === 'None') return false;
         if (paused) return false;
         if (authBlocked) return false;
         return true;
@@ -297,6 +299,10 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         if (current(session)) return; //checks if the existing connection is correct
         stopSession();
         reconnectDelay = 500;
+        if (toggle.value === 'None') {
+            setText('No connection selected.');
+            return;
+        }
         if (enabled()) {
             if (toggle.value === 'Control_Through_Server') connect(false);
             else connect(true);
