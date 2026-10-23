@@ -18,7 +18,7 @@
   width: 100%;
 
   /* roughly 5-10% of viewport height */
-  height: 4vh;
+  min-height: 4vh;
 
   padding: 0.75rem 1.5rem;
 
@@ -26,10 +26,46 @@
 
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
 
   background-color: #222;
   color: white;
 }
+
+.connection-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.connection-toggle input {
+  appearance: none;
+  width: 2rem;
+  height: 1.125rem;
+  margin: 0;
+  border-radius: 1rem;
+  background: #777;
+  cursor: pointer;
+}
+
+.connection-toggle input::before {
+  content: '';
+  display: block;
+  width: 0.875rem;
+  height: 0.875rem;
+  margin: 0.125rem;
+  border-radius: 50%;
+  background: white;
+}
+
+.connection-toggle input:checked { background: #1976d2; }
+.connection-toggle input:checked::before { transform: translateX(0.875rem); }
+.connection-toggle input:focus-visible { outline: 2px solid white; outline-offset: 3px; }
+
+#latency { white-space: nowrap; font-variant-numeric: tabular-nums; }
+#liveData { min-width: 0; overflow-wrap: anywhere; }
 
 /*middle layout*/
 #feature1_middle {

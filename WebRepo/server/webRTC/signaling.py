@@ -3,12 +3,14 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import redis.asyncio as redis
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi_users.authentication import JWTStrategy
 
-from server.auth import _authenticate_slave_api_key, COOKIE_NAME, JWT_SECRET, COOKIE_MAX_AGE
+from server.auth import _authenticate_slave_api_key, current_active_user, COOKIE_NAME, JWT_SECRET, COOKIE_MAX_AGE
 from server.models import User
 from .webRTC_manager import WebRTCManager
 from .offer_processor import RTCOfferProcessor
@@ -42,6 +44,12 @@ async def rtc_lifespan(app): #reviewed
 
 
 webRTC_router = APIRouter(lifespan=rtc_lifespan)
+
+
+@webRTC_router.get("/api/webrtc/live_webrtc.js")
+async def client_module(user: User = Depends(current_active_user)):
+    return FileResponse(Path(__file__).with_name("live_webrtc.js"), media_type="text/javascript",
+                        headers={"Cache-Control": "no-store"})
 
 
 async def _ws_authenticate(websocket: WebSocket) -> User | None: #reviewed

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING
@@ -36,8 +37,14 @@ class ClientSession:
 
                 @channel.on("message")
                 def on_message(message):
-                    if not self._closing and self.robot is not None:
-                        self.robot.send_control(message)
+                    if self._closing or self.robot is None or not isinstance(message, (str, bytes)) or len(message) > 16384:
+                        return
+                    try:
+                        control = json.loads(message)
+                        if isinstance(control, dict) and control.get("master_mode") is True and "command" in control:
+                            self.robot.send_control(json.dumps(control["command"], allow_nan=False))
+                    except (ValueError, TypeError):
+                        return
 
         @self.pc.on("connectionstatechange")
         async def on_connectionstatechange():

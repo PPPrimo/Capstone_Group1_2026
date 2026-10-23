@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Feature 1</title>
   <link rel="stylesheet" href="./assets/base.css?v=20251214" />
-  <link rel="stylesheet" href="./assets/feature1.css" />
+  <link rel="stylesheet" href="./assets/feature1.css?v=20261022-2" />
 </head>
 <body>
   <section id="feature1" class="panel">
@@ -14,6 +14,13 @@
           <option value="Control_Through_Server">Control through server</option>
           <option value="Direct_Control">Direct control</option>
       </select>
+      <label class="connection-toggle" title="Retry failed connections until one succeeds">
+        <input id="retryConnection" type="checkbox" role="switch" checked /> Retry connection
+      </label>
+      <label class="connection-toggle" title="Enable sending commands to the robot">
+        <input id="masterMode" type="checkbox" role="switch" /> Master mode
+      </label>
+      <span id="latency" title="Round-trip latency to the connected WebRTC peer">Latency: — ms</span>
       <div id = "liveData">
         Live data (WebSocket): Waiting for data...
       </div>
@@ -52,7 +59,7 @@
     </div>
 
   </section>
-  <script type="module" src="./src/live_webrtc.js?v=20261022"></script>
+  <script type="module" src="./src/webrtc_setup.js?v=20261022-3"></script>
   <script src="./assets/read_only.js?v=20251222"></script>
 </body>
 </html>
