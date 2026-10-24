@@ -187,7 +187,27 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         session = s;
 
         try {
-            const pc = s.pc = new RTCPeerConnection({ iceServers: CONFIG.iceServers });
+            deadline(s, 10000, 'Fetching connection settings timed out.');
+            setText('Fetching connection settings...');
+            const response = await fetch('/api/webrtc/ice-servers', {
+                credentials: 'same-origin',
+                cache: 'no-store',
+                signal: s.abort.signal
+            });
+            if (!current(s)) return;
+            if (response.status === 401 || response.status === 403) {
+                authBlocked = true;
+                stopSession();
+                setText('Unauthorized. Log in, then refresh the page.');
+                return;
+            }
+            if (!response.ok) throw new Error(`Cannot fetch connection settings (HTTP ${response.status}).`);
+            const settings = await response.json();
+            if (!current(s)) return;
+            if (!Array.isArray(settings.iceServers) || !settings.iceServers.length) {
+                throw new Error('Invalid connection settings.');
+            }
+            const pc = s.pc = new RTCPeerConnection({ iceServers: settings.iceServers });
             //debuging messages to find out issues with ICE
             pc.onicecandidate = event => {
                 console.log(
@@ -313,7 +333,7 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         refresh: syncMode,
         sendControl(message) {
             const s = session;
-            if (!master.checked || !s || !current(s) || s.channel.readyState !== 'open') return false;
+            if (!master.checked || !s || !current(s) || s.channel?.readyState !== 'open') return false;
             // Carry the gate with each command; teleop is unordered and may drop packets.
             s.channel.send(JSON.stringify(s.mode === 'Control_Through_Server'
                 ? { master_mode: true, command: message } : message));

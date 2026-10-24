@@ -1,9 +1,8 @@
-import { initLiveWebRTC } from '/api/webrtc/live_webrtc.js?v=20261023-2';
+import { initLiveWebRTC } from '/api/webrtc/live_webrtc.js?v=20261023-3';
 
 const CONFIG = {
     robotName: 'CapstoneBot',
     robotRole: 'Base',
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] //{ urls: 'stun:stun.l.google.com:19302' }
 };
 
 function init() {

@@ -13,8 +13,6 @@ from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSession
 from .RtcVideo import SwitchableVideoTrack
 
 logger = logging.getLogger(__name__)
-ICE_SERVERS = [{"urls": "stun:stun.l.google.com:19302"}]
-# Add TURN credentials here when required by your network.
 OFFER_TIMEOUT = 20
 SIGNAL_TIMEOUT = 40
 CONNECT_TIMEOUT = 30
@@ -300,9 +298,35 @@ class RobotRTC:
         except aiohttp.ClientError:
             raise RuntimeError("Cannot reach RTC signaling server") from None
 
+    async def _fetch_ice_servers(self):
+        parts = urlsplit(self.SERVER_URL)
+        scheme = {"ws": "http", "wss": "https"}.get(parts.scheme, parts.scheme)
+        base = parts._replace(scheme=scheme).geturl().rstrip("/")
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
+                async with http.get(
+                    f"{base}/api/webrtc/ice-servers",
+                    headers={"X-API-Key": self.API_KEY},
+                    allow_redirects=False,
+                ) as response:
+                    if response.status in (401, 403):
+                        raise AuthenticationError("RTC authentication rejected; check API_KEY")
+                    if response.status != 200:
+                        raise RuntimeError(f"Cannot fetch ICE settings (HTTP {response.status})")
+                    settings = await response.json()
+            servers = settings.get("iceServers") if isinstance(settings, dict) else None
+            if not isinstance(servers, list) or not servers:
+                raise ValueError("Invalid ICE settings")
+            return [RTCIceServer(**item) for item in servers]
+        except (aiohttp.ClientError, TimeoutError, ValueError, TypeError):
+            raise RuntimeError("Cannot fetch valid RTC connection settings") from None
+
     async def _connection(self):
         #attempt 1 connection, check status upon statechange or 1 second, terminates after timeout
-        pc = self.pc = RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(**item) for item in ICE_SERVERS]))
+        ice_servers = await self._fetch_ice_servers()
+        if self._closing:
+            return
+        pc = self.pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers))
         track = self.video_track = SwitchableVideoTrack(self.video_source)
         try:
             pc.addTransceiver(track, direction="sendonly")
@@ -504,10 +528,14 @@ class RobotRTC:
             state["changed"].set()
 
     async def _run_direct(self, state): #reviewed
-        pc = state["pc"] = RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(**item) for item in ICE_SERVERS]))
-        self._setup_direct_handlers(state)
+        pc = None
         negotiating = None
         try:
+            ice_servers = await self._fetch_ice_servers()
+            if state["cancelled"] or not self.connected or self._direct is not state:
+                return
+            pc = state["pc"] = RTCPeerConnection(RTCConfiguration(iceServers=ice_servers))
+            self._setup_direct_handlers(state)
             negotiating = asyncio.create_task(self._answer_direct(state))
             async with asyncio.timeout(OFFER_TIMEOUT):
                 while not negotiating.done(): #repeat informs server R_Rdy untill the negotiation is done
@@ -555,7 +583,8 @@ class RobotRTC:
                 if not negotiating.done():
                     negotiating.cancel()
                 await asyncio.gather(negotiating, return_exceptions=True)
-            await pc.close()
+            if pc is not None:
+                await pc.close()
             if state["track"] is not None:
                 state["track"].stop()
             if self._direct is state:

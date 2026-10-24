@@ -10,6 +10,13 @@
 /3DPrintFiles/old files
 /lerobot - legacy
 /local_logs
+/tests
+/WebRepo/Resources
+/WebRepo/server/sensitive
+/WebRepo/server/.session_secret
+/WebRepo/server/.htpasswd
+/WebRepo/server/nginx/
+!/WebRepo/server/nginx/conf
 # Optional: common Python/OS noise (kept minimal)
 __pycache__/
 *.py[cod]

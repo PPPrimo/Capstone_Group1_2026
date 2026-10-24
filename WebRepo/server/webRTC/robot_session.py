@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 
 from aiortc import RTCPeerConnection, RTCDataChannel
 from aiortc.contrib.media import MediaRelay
+from .ice_config import peer_configuration
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ class RobotSession:
         self.robot_id = robot_id
         self.robot_role = robot_role
         self.logger_start = f"id: {robot_id} | role: {robot_role} - "
-        self.pc = RTCPeerConnection()
+        self.pc = RTCPeerConnection(peer_configuration(f"robot:{robot_id}"))
         self.control_channel: RTCDataChannel | None = None
         self.auxiliary_channel: RTCDataChannel | None = None
         self.auxiliary_messages = {}

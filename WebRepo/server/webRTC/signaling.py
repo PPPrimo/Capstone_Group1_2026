@@ -6,14 +6,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import redis.asyncio as redis
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi_users.authentication import JWTStrategy
 
-from server.auth import _authenticate_slave_api_key, current_active_user, COOKIE_NAME, JWT_SECRET, COOKIE_MAX_AGE
+from server.auth import _authenticate_slave_api_key, _require_active_user_or_api_key, current_active_user, COOKIE_NAME, JWT_SECRET, COOKIE_MAX_AGE
 from server.models import User
 from .webRTC_manager import WebRTCManager
 from .offer_processor import RTCOfferProcessor
+from .ice_config import ice_credentials, turn_settings
 
 logger = logging.getLogger(__name__)
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
@@ -25,6 +26,7 @@ offer_processor: RTCOfferProcessor | None = None
 @asynccontextmanager
 async def rtc_lifespan(app): #reviewed
     global _redis_client, webrtc_manager, offer_processor
+    turn_settings()
     # Construct per-worker resources after process startup, including pre-fork servers.
     _redis_client = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=3, socket_timeout=None)
     webrtc_manager = WebRTCManager(worker_id=f"{os.getpid()}:{uuid.uuid4().hex}", redis=_redis_client)
@@ -44,6 +46,29 @@ async def rtc_lifespan(app): #reviewed
 
 
 webRTC_router = APIRouter(lifespan=rtc_lifespan)
+
+
+@webRTC_router.get("/api/webrtc/ice-servers")
+async def get_ice_servers(user: User = Depends(_require_active_user_or_api_key)):
+    # Redis keeps the limit shared across all gunicorn workers.
+    if _redis_client is None:
+        raise HTTPException(status_code=503, detail="RTC service is unavailable")
+    try:
+        count = await _redis_client.eval(
+            "local n = redis.call('INCR', KEYS[1]); "
+            "if n == 1 then redis.call('EXPIRE', KEYS[1], 60) end; return n",
+            1, f"rtc:ice-credentials:{user.id}",
+        )
+    except redis.RedisError:
+        raise HTTPException(status_code=503, detail="RTC service is unavailable") from None
+    if count > 30:
+        raise HTTPException(status_code=429, detail="Too many credential requests",
+                            headers={"Retry-After": "60", "Cache-Control": "no-store"})
+    try:
+        payload = ice_credentials(str(user.id))
+    except (KeyError, ValueError):
+        raise HTTPException(status_code=503, detail="TURN configuration is invalid") from None
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
 
 
 @webRTC_router.get("/api/webrtc/live_webrtc.js")

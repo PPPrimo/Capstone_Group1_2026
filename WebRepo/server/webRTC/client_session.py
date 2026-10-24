@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING
 
 from aiortc import RTCPeerConnection, RTCDataChannel
+from .ice_config import peer_configuration
 
 if TYPE_CHECKING:
     from .robot_session import RobotSession
@@ -18,7 +19,7 @@ class ClientSession:
     def __init__(self, client_id: str, robot: RobotSession | None = None, on_disconnect: Callable[[ClientSession], Awaitable[None]] | None = None):
         self.client_id = client_id
         self.robot = robot
-        self.pc = RTCPeerConnection()
+        self.pc = RTCPeerConnection(peer_configuration(f"client:{client_id}"))
         self.control_channel: RTCDataChannel | None = None
         self.connected = False
         self._closing = False
