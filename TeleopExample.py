@@ -65,7 +65,6 @@ logging.getLogger("aioice.ice").addFilter(IceLogFilter())
 logger = logging.getLogger(__name__)
 ## Logger end
 
-
 payload = None
 payload_lock = threading.Lock()
 payload_temp = None
@@ -119,7 +118,7 @@ def run_follower_local(device):
         sync_states_to_follower(device, states)
         time.sleep(ExcutionPeriod)
 
-async def receive_loop(rtc):
+async def receive_loop(rtc, teleop_device):
     while True:
         control = await rtc.receive_control()
         control = json.loads(control)
@@ -127,19 +126,24 @@ async def receive_loop(rtc):
         with latency_log_lock:
             latency_log.pop(0)
             latency_log.append(latency_ms)
+        if "leadState" in control:
+            sync_states_to_follower(teleop_device, control["leadState"])
         logger.info("Received control: %r", control)
 
 
-async def send_loop(rtc):
+async def send_loop(rtc, teleop_device):
     while True:
         with latency_log_lock:
             latency_avg_ms = sum(latency_log) / len(latency_log)
-        message = {"timestamp": time.time(), "latency_avg_ms": latency_avg_ms}
+        message = {
+            "timestamp": time.time(), 
+            "latency_avg_ms": latency_avg_ms, 
+            }
         send_result = rtc.send_control(message)
         logger.info("telemetry: %s", json.dumps({**message, "sent": send_result}))
         await asyncio.sleep(0.1)  # Send every 100 ms
 
-async def run_follower():
+async def run_follower(teleop_device):
     rtc = RobotRTC(
         SERVER_URL = SERVER_URL, 
         ROBOT_NAME = ROBOT_NAME, 
@@ -151,8 +155,8 @@ async def run_follower():
     logger.info("RTC connected")
     try:
         async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(receive_loop(rtc))
-            tasks.create_task(send_loop(rtc))
+            tasks.create_task(receive_loop(rtc, teleop_device))
+            tasks.create_task(send_loop(rtc, teleop_device))
     finally:
         await rtc.close()
 
@@ -203,14 +207,14 @@ def main():
                         thread_follower.join(timeout=0.2)
                         
         elif args.type == "Follower":
-            # teleop_config = FollowerRobotConfig(
-            #     port=args.COM,
-            #     id="PrimoFollower",
-            #     calibration_dir=Path("RobotFiles/calibration/follower")
-            # )
-            # teleop_device = Follower(teleop_config)
-            # teleop_device.connect()
-            asyncio.run(run_follower())
+            teleop_config = FollowerRobotConfig(
+                port=args.COM,
+                id="PrimoFollower",
+                calibration_dir=Path("RobotFiles/calibration/follower")
+            )
+            teleop_device = Follower(teleop_config)
+            teleop_device.connect()
+            asyncio.run(run_follower(teleop_device))
 
         elif args.type == "Leader":
             # teleop_config = LeaderTeleopConfig(
