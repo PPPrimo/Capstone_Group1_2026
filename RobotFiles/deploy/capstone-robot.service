@@ -1,0 +1,22 @@
+# Starts the program at boot on the Pi
+
+[Unit]
+Description=Capstone robot (camera stream + WebRTC)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=alexis
+WorkingDirectory=/home/alexis/Capstone_Group1_2026
+ExecStart=/home/alexis/venv/bin/python TeleopExample.py --type Follower --COM /dev/ttyACM0 --local f
+# Print log lines immediately instead of buffering them.
+Environment=PYTHONUNBUFFERED=1
+# SIGINT acts like Ctrl+C, so the program's finally blocks close the cameras and connection cleanly.
+KillSignal=SIGINT
+TimeoutStopSec=15
+# Restart after a crash or lost connection, e.g. when the hotspot drops.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
