@@ -91,6 +91,13 @@ class CameraSource:
         camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         camera.set(cv2.CAP_PROP_FPS, self.fps)
         camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Keep latency low: don't queue old frames.
+        fourcc = int(camera.get(cv2.CAP_PROP_FOURCC)).to_bytes(4, "little").decode(errors="replace")
+        logger.info(
+            "Camera %r negotiated %s %dx%d @ %.0f fps",
+            self.source, fourcc,
+            int(camera.get(cv2.CAP_PROP_FRAME_WIDTH)), int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            camera.get(cv2.CAP_PROP_FPS),
+        )
         return camera
 
     def _read(self, camera):
