@@ -85,6 +85,8 @@ class CameraSource:
         if not camera.isOpened():
             camera.release()
             return None
+        # MJPG lets most USB webcams reach full FPS; raw YUYV is often capped at ~15 fps.
+        camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         camera.set(cv2.CAP_PROP_FPS, self.fps)
