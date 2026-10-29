@@ -90,7 +90,8 @@ class CameraSource:
         camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         camera.set(cv2.CAP_PROP_FPS, self.fps)
-        camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Keep latency low: don't queue old frames.
+        # Keep the default driver buffers: with only 1, the camera drops every other frame
+        # while we decode. _capture() reads continuously, so stale frames don't build up.
         fourcc = int(camera.get(cv2.CAP_PROP_FOURCC)).to_bytes(4, "little").decode(errors="replace")
         logger.info(
             "Camera %r negotiated %s %dx%d @ %.0f fps",
