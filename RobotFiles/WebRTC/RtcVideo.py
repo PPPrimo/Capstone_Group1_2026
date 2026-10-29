@@ -68,9 +68,77 @@ class CameraSource:
     def ready(self):
         return self.latest_frame() is not None
 
-    def _capture(self):
+    def _open(self): # TODO: not reviewed 
+        """Open the camera device; returns the handle, or None if it is unavailable."""
+        if self.backend == "picamera2":
+            from picamera2 import Picamera2  # Only present on Raspberry Pi OS.
+            camera = Picamera2()
+            # Picamera2's "RGB888" is stored in BGR order, which is what OpenCV/aiortc expect.
+            camera.configure(camera.create_video_configuration(
+                main={"size": (self.width, self.height), "format": "RGB888"},
+                controls={"FrameRate": self.fps},
+            ))
+            camera.start()
+            return camera
+
+        camera = cv2.VideoCapture(self.source)
+        if not camera.isOpened():
+            camera.release()
+            return None
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        camera.set(cv2.CAP_PROP_FPS, self.fps)
+        camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Keep latency low: don't queue old frames.
+        return camera
+
+    def _read(self, camera):
+        """Blocking read of one BGR uint8 frame, or None on failure."""
+        if self.backend == "picamera2":
+            return camera.capture_array()
+        ok, frame = camera.read()
+        return frame if ok else None
+
+    def _release(self, camera):
+        try:
+            if self.backend == "picamera2":
+                camera.stop()
+                camera.close()
+            else:
+                camera.release()
+        except Exception:
+            logger.exception("Error releasing camera")
+
+    def _capture(self): # TODO: not reviewed 
+        """Capture thread: keep the newest frame in self._frame, reopening the camera on failure."""
         while not self._stop.is_set():
-            return None #should return a numpy.ndarray
+            try:
+                camera = self._open()
+            except ImportError:
+                logger.error("picamera2 is not installed; use backend='opencv' or install python3-picamera2")
+                return
+            except Exception:
+                logger.exception("Failed to open camera %r", self.source)
+                camera = None
+            if camera is None:
+                logger.warning("Camera %r unavailable; retrying in 1 s", self.source)
+                self._stop.wait(1.0)
+                continue
+
+            logger.info("Camera %r opened with %s backend", self.source, self.backend)
+            try:
+                while not self._stop.is_set():
+                    frame = self._read(camera)
+                    if frame is None:
+                        logger.warning("Camera read failed; reopening")
+                        break
+                    with self._lock:
+                        self._frame = frame
+                        self._frame_time = time.monotonic()
+            except Exception:
+                logger.exception("Camera capture error; reopening")
+            finally:
+                self._release(camera)
+            self._stop.wait(1.0)
 
     async def close(self):
         self._stop.set()
