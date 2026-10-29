@@ -77,6 +77,8 @@ payload_temp = None
 payload_temp_lock = threading.Lock()
 latency_log = [0.0] * 10
 latency_log_lock = threading.Lock()
+received_count = 0
+STATUS_PERIOD = 5.0
 stop_event = threading.Event()
 ExcutionPeriod = 0.01
 """Global Variables End"""
@@ -125,6 +127,7 @@ def run_follower_local(device):
         time.sleep(ExcutionPeriod)
 
 async def receive_loop(rtc):
+    global received_count
     while True:
         control = await rtc.receive_control()
         control = json.loads(control)
@@ -132,16 +135,29 @@ async def receive_loop(rtc):
         with latency_log_lock:
             latency_log.pop(0)
             latency_log.append(latency_ms)
-        logger.info("Received control: %r", control)
+            received_count += 1
+        logger.debug("Received control: %r", control)
 
 
 async def send_loop(rtc):
+    global received_count
+    sent_count = 0
+    last_status = time.monotonic()
     while True:
         with latency_log_lock:
             latency_avg_ms = sum(latency_log) / len(latency_log)
         message = {"timestamp": time.time(), "latency_avg_ms": latency_avg_ms}
         send_result = rtc.send_control(message)
-        logger.info("telemetry: %s", json.dumps({**message, "sent": send_result}))
+        sent_count += bool(send_result)
+        logger.debug("telemetry: %s", json.dumps({**message, "sent": send_result}))
+
+        if time.monotonic() - last_status >= STATUS_PERIOD:
+            with latency_log_lock:
+                received, received_count = received_count, 0
+            logger.info("status: sent %d telemetry, received %d controls, latency avg %.1f ms",
+                        sent_count, received, latency_avg_ms)
+            sent_count = 0
+            last_status = time.monotonic()
         await asyncio.sleep(0.1)  # Send every 100 ms
 
 async def run_follower():
