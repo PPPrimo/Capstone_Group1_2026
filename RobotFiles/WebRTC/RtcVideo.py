@@ -33,9 +33,7 @@ class CameraSource:
     Failed capture is retried; frames older than stale_after become unavailable.
     Call start() explicitly and await close() when the source is no longer needed.
     """
-    def __init__(self, source=CAMERA_SOURCE, backend=CAMERA_BACKEND, width=VIDEO_WIDTH, height=VIDEO_HEIGHT, fps=VIDEO_FPS, stale_after=1.0, exposure=None, gain=None):
-        """exposure/gain (OpenCV only): None leaves the camera's setting untouched;
-        a number switches to manual exposure (V4L2 exposure_time_absolute units) / sets gain."""
+    def __init__(self, source=CAMERA_SOURCE, backend=CAMERA_BACKEND, width=VIDEO_WIDTH, height=VIDEO_HEIGHT, fps=VIDEO_FPS, stale_after=1.0, exposure=None, gain=None, target_brightness=110):
         if backend not in ("opencv", "picamera2"):
             raise ValueError("Camera backend must be opencv or picamera2")
         if width <= 0 or height <= 0 or fps <= 0 or stale_after <= 0:
@@ -43,6 +41,9 @@ class CameraSource:
         self.source, self.backend = source, backend
         self.width, self.height, self.fps = width, height, fps
         self.exposure, self.gain = exposure, gain
+        self.target_brightness = target_brightness
+        self.raw_brightness = None  # Mean of the last frame before correction
+        self._gamma = 1.0
         self.stale_after = stale_after
         self._frame = None
         self._frame_time = 0.0
@@ -117,6 +118,20 @@ class CameraSource:
         ok, frame = camera.read()
         return frame if ok else None
 
+    def _brighten(self, frame):
+        mean = float(frame[::8, ::8].mean())  
+        self.raw_brightness = mean
+        if self.target_brightness is None:
+            return frame
+ 
+        wanted = np.log(self.target_brightness / 255) / np.log(min(max(mean, 1.0), 254.0) / 255)
+        wanted = float(np.clip(wanted, 0.3, 1.0))
+        self._gamma += 0.2 * (wanted - self._gamma)
+        if self._gamma > 0.97:
+            return frame
+        lut = (np.linspace(0, 1, 256) ** self._gamma * 255).astype(np.uint8)
+        return cv2.LUT(frame, lut)
+
     def _release(self, camera):
         try:
             if self.backend == "picamera2":
@@ -150,6 +165,7 @@ class CameraSource:
                     if frame is None:
                         logger.warning("Camera read failed; reopening")
                         break
+                    frame = self._brighten(frame)
                     with self._lock:
                         self._frame = frame
                         self._frame_time = time.monotonic()
