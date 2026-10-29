@@ -33,13 +33,16 @@ class CameraSource:
     Failed capture is retried; frames older than stale_after become unavailable.
     Call start() explicitly and await close() when the source is no longer needed.
     """
-    def __init__(self, source=CAMERA_SOURCE, backend=CAMERA_BACKEND, width=VIDEO_WIDTH, height=VIDEO_HEIGHT, fps=VIDEO_FPS, stale_after=1.0):
+    def __init__(self, source=CAMERA_SOURCE, backend=CAMERA_BACKEND, width=VIDEO_WIDTH, height=VIDEO_HEIGHT, fps=VIDEO_FPS, stale_after=1.0, exposure=None, gain=None):
+        """exposure/gain (OpenCV only): None leaves the camera's setting untouched;
+        a number switches to manual exposure (V4L2 exposure_time_absolute units) / sets gain."""
         if backend not in ("opencv", "picamera2"):
             raise ValueError("Camera backend must be opencv or picamera2")
         if width <= 0 or height <= 0 or fps <= 0 or stale_after <= 0:
             raise ValueError("Video dimensions, FPS and stale_after must be positive")
         self.source, self.backend = source, backend
         self.width, self.height, self.fps = width, height, fps
+        self.exposure, self.gain = exposure, gain
         self.stale_after = stale_after
         self._frame = None
         self._frame_time = 0.0
@@ -92,12 +95,18 @@ class CameraSource:
         camera.set(cv2.CAP_PROP_FPS, self.fps)
         # Keep the default driver buffers: with only 1, the camera drops every other frame
         # while we decode. _capture() reads continuously, so stale frames don't build up.
+        if self.exposure is not None:
+            camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # V4L2 menu value 1 = manual exposure.
+            camera.set(cv2.CAP_PROP_EXPOSURE, self.exposure)
+        if self.gain is not None:
+            camera.set(cv2.CAP_PROP_GAIN, self.gain)
         fourcc = int(camera.get(cv2.CAP_PROP_FOURCC)).to_bytes(4, "little").decode(errors="replace")
         logger.info(
-            "Camera %r negotiated %s %dx%d @ %.0f fps",
+            "Camera %r negotiated %s %dx%d @ %.0f fps (auto_exposure=%g exposure=%g gain=%g)",
             self.source, fourcc,
             int(camera.get(cv2.CAP_PROP_FRAME_WIDTH)), int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT)),
             camera.get(cv2.CAP_PROP_FPS),
+            camera.get(cv2.CAP_PROP_AUTO_EXPOSURE), camera.get(cv2.CAP_PROP_EXPOSURE), camera.get(cv2.CAP_PROP_GAIN),
         )
         return camera
 

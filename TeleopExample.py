@@ -27,6 +27,8 @@ teleop_device = None
 SERVER_URL = "http://127.0.0.1:8000"
 ROBOT_NAME = "CapstoneBot"
 ROBOT_ROLE = "Base"
+CAMERA_SOURCE = 0            # /dev/video0 (USB webcam)
+CAMERA_BACKEND = "opencv"    # "picamera2" for the ribbon camera
 API_KEY = "uapi_6eae160cc1.e7Tvl37uJmipwBuji6KHd5Bq4JQPhAK_Rb0GinoBcGs"
 
 SERVER_URL = os.getenv("PUBLISH_URL", "https://primowang.com/").rstrip("/")
@@ -140,21 +142,25 @@ async def send_loop(rtc):
         await asyncio.sleep(0.1)  # Send every 100 ms
 
 async def run_follower():
+    # The track only reads latest_frame(); we own the camera and close it after RTC.
+    camera = CameraSource(source=CAMERA_SOURCE, backend=CAMERA_BACKEND).start()
     rtc = RobotRTC(
-        SERVER_URL = SERVER_URL, 
-        ROBOT_NAME = ROBOT_NAME, 
-        ROBOT_ROLE = ROBOT_ROLE, 
+        video_source = camera,
+        SERVER_URL = SERVER_URL,
+        ROBOT_NAME = ROBOT_NAME,
+        ROBOT_ROLE = ROBOT_ROLE,
         API_KEY = API_KEY)
 
-    await rtc.connect()
-    print("connected")
-    logger.info("RTC connected")
     try:
+        await rtc.connect()
+        print("connected")
+        logger.info("RTC connected")
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(receive_loop(rtc))
             tasks.create_task(send_loop(rtc))
     finally:
         await rtc.close()
+        await camera.close()
 
 def main():
     global ExcutionPeriod
