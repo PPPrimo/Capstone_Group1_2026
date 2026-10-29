@@ -1,11 +1,10 @@
-"""Check that CameraSource captures real frames, without WebRTC.
+"""Check that the cameras capture real frames, without WebRTC.
 
 Run from the repo root:
     python -m RobotFiles.helpers.CameraTester                      # USB camera 0
     python -m RobotFiles.helpers.CameraTester --source 2           # another /dev/videoN
     python -m RobotFiles.helpers.CameraTester --backend picamera2  # Pi ribbon camera
-    python -m RobotFiles.helpers.CameraTester --exposure 300 --gain 50   # manual exposure
-    python -m RobotFiles.helpers.CameraTester --no-correction      # raw camera brightness
+    python -m RobotFiles.helpers.CameraTester --both               # USB + ribbon side by side
 """
 from __future__ import annotations
 
@@ -17,57 +16,64 @@ from pathlib import Path
 
 import cv2
 
-from RobotFiles.WebRTC import CameraSource
+from RobotFiles.WebRTC import CameraSource, SideBySide
 
 
-async def run(source, backend: str, seconds: float, output: Path, exposure, gain, correction: bool) -> bool:
-    camera = CameraSource(
-        source=source, backend=backend, exposure=exposure, gain=gain,
-        target_brightness=110 if correction else None,
-    ).start()
+async def run(cameras: list[CameraSource], seconds: float, output: Path) -> bool:
+    for camera in cameras:
+        camera.start()
     try:
         deadline = time.monotonic() + 5.0
-        while not camera.ready and time.monotonic() < deadline:
+        while not all(camera.ready for camera in cameras) and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
-        if not camera.ready:
-            print("FAIL: no frame within 5 s")
-            return False
 
-        # Count distinct frames to measure the real capture rate.
-        frames = 0
-        last = None
+        # Count distinct frames per camera to measure the real capture rate.
+        counts = [0] * len(cameras)
+        last = [None] * len(cameras)
         start = time.monotonic()
         while time.monotonic() - start < seconds:
-            frame = camera.latest_frame()
-            if frame is not None and frame is not last:
-                frames += 1
-                last = frame
+            for i, camera in enumerate(cameras):
+                frame = camera.latest_frame()
+                if frame is not None and frame is not last[i]:
+                    counts[i] += 1
+                    last[i] = frame
             await asyncio.sleep(0.002)
 
-        print(f"OK: frame shape {last.shape}, dtype {last.dtype}, ~{frames / seconds:.1f} fps")
-        # 0 = black, 255 = white; a normally lit room is roughly 80-150.
-        print(f"Mean brightness: {camera.raw_brightness:.1f} from camera -> {last.mean():.1f} after correction (/ 255)")
-        cv2.imwrite(str(output), last)
-        print(f"Saved snapshot to {output.resolve()}")
-        return True
+        ok = True
+        for camera, frame, count in zip(cameras, last, counts):
+            if frame is None:
+                print(f"FAIL {camera.name}: no frames")
+                ok = False
+            else:
+                # Brightness: 0 = black, 255 = white; a normally lit room is roughly 80-150.
+                print(f"OK   {camera.name}: {frame.shape}, ~{count / seconds:.1f} fps, brightness {frame.mean():.0f}/255")
+
+        picture = SideBySide(*cameras).latest_frame()
+        if picture is not None:
+            cv2.imwrite(str(output), picture)
+            print(f"Saved snapshot to {output.resolve()}")
+        return ok
     finally:
-        await camera.close()
+        for camera in cameras:
+            await camera.close()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Test CameraSource capture")
-    parser.add_argument("--source", default="0", help="Camera index (0, 1, ...) or stream URL")
+    parser = argparse.ArgumentParser(description="Test camera capture")
+    parser.add_argument("--source", default="0", help="USB camera index (0, 1, ...) or device path")
     parser.add_argument("--backend", default="opencv", choices=["opencv", "picamera2"])
+    parser.add_argument("--both", action="store_true", help="Test the USB and ribbon cameras together")
     parser.add_argument("--seconds", type=float, default=3.0, help="How long to measure FPS")
     parser.add_argument("--output", type=Path, default=Path("snapshot.jpg"))
-    parser.add_argument("--exposure", type=float, default=None, help="Manual exposure (omit to keep camera's mode)")
-    parser.add_argument("--gain", type=float, default=None, help="Sensor gain (omit to keep camera's setting)")
-    parser.add_argument("--no-correction", action="store_true", help="Disable software brightness correction")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     source = int(args.source) if args.source.isdigit() else args.source
-    ok = asyncio.run(run(source, args.backend, args.seconds, args.output, args.exposure, args.gain, not args.no_correction))
+    if args.both:
+        cameras = [CameraSource(source=source, backend="opencv"), CameraSource(backend="picamera2")]
+    else:
+        cameras = [CameraSource(source=source, backend=args.backend)]
+    ok = asyncio.run(run(cameras, args.seconds, args.output))
     raise SystemExit(0 if ok else 1)
 
 

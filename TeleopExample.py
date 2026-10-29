@@ -2,7 +2,7 @@
 
 from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
 from RobotFiles.Drivers.FollowerArm import FollowerRobotConfig, Follower
-from RobotFiles.WebRTC import RobotRTC, CameraSource
+from RobotFiles.WebRTC import RobotRTC, CameraSource, SideBySide
 
 from WebRepo.server.plot_logger import log_and_plot, flush_plot, set_layout, set_role, set_realtime_plot, plot_json
 
@@ -27,8 +27,11 @@ teleop_device = None
 SERVER_URL = "http://127.0.0.1:8000"
 ROBOT_NAME = "CapstoneBot"
 ROBOT_ROLE = "Base"
-CAMERA_SOURCE = 0            # /dev/video0 (USB webcam)
-CAMERA_BACKEND = "opencv"    # "picamera2" for the ribbon camera
+# Cameras streamed to the browser
+CAMERAS = [
+    {"source": 0, "backend": "opencv"},   # USB webcam (/dev/video0)
+    {"backend": "picamera2"},             # Pi ribbon camera
+]
 API_KEY = "uapi_6eae160cc1.e7Tvl37uJmipwBuji6KHd5Bq4JQPhAK_Rb0GinoBcGs"
 
 SERVER_URL = os.getenv("PUBLISH_URL", "https://primowang.com/").rstrip("/")
@@ -142,10 +145,10 @@ async def send_loop(rtc):
         await asyncio.sleep(0.1)  # Send every 100 ms
 
 async def run_follower():
-    # The track only reads latest_frame(); we own the camera and close it after RTC.
-    camera = CameraSource(source=CAMERA_SOURCE, backend=CAMERA_BACKEND).start()
+    # The track only reads latest_frame(); we own the cameras and close them after RTC.
+    cameras = [CameraSource(**camera).start() for camera in CAMERAS]
     rtc = RobotRTC(
-        video_source = camera,
+        video_source = cameras[0] if len(cameras) == 1 else SideBySide(*cameras),
         SERVER_URL = SERVER_URL,
         ROBOT_NAME = ROBOT_NAME,
         ROBOT_ROLE = ROBOT_ROLE,
@@ -160,7 +163,8 @@ async def run_follower():
             tasks.create_task(send_loop(rtc))
     finally:
         await rtc.close()
-        await camera.close()
+        for camera in cameras:
+            await camera.close()
 
 def main():
     global ExcutionPeriod
