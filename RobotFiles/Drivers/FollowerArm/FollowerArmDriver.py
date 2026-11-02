@@ -19,22 +19,19 @@ import time
 from functools import cached_property
 
 from lerobot.cameras import make_cameras_from_configs
-from lerobot.lerobot_types import RobotAction, RobotObservation
+from lerobot.lerobot_types import RobotObservation
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
-from lerobot.motors.feetech import (
-    FeetechMotorsBus,
-    OperatingMode,
-)
+from lerobot.motors.feetech import OperatingMode
+from ..MotorDriver import MotorDriver
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from lerobot.robots.robot import Robot
-from lerobot.robots.utils import ensure_safe_goal_position
 from .config_follower_arm import FollowerArmConfig
 
 logger = logging.getLogger(__name__)
 
 
-class Follower(Robot):
+class Follower(MotorDriver, Robot):
     """
     Generic SO follower base implementing common functionality for SO-100/101/10X.
     Designed to be subclassed with a per-hardware-model `config_class` and `name`.
@@ -44,27 +41,27 @@ class Follower(Robot):
     name = "follower"
 
     def __init__(self, config: FollowerArmConfig):
-        super().__init__(config)
+        Robot.__init__(self, config)
         self.config = config
         # choose normalization mode depending on config if available
-        norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
-        self.bus = FeetechMotorsBus(
-            port=self.config.port,
-            motors={
-                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
-                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                "wrist_roll": Motor(5, "sts3215", norm_mode_body),
-                "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
-            },
+        norm = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
+        motors = {
+            name: Motor(index, "sts3215", norm)
+            for index, name in enumerate(
+                ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"),
+                start=1,
+            )
+        }
+        motors["gripper"] = Motor(6, "sts3215", MotorNormMode.RANGE_0_100)
+        MotorDriver.__init__(
+            self,
+            port=config.port,
+            motors=motors,
             calibration=self.calibration,
+            num_read_retries=config.num_read_retries,
+            max_relative_target=config.max_relative_target,
         )
         self.cameras = make_cameras_from_configs(config.cameras)
-
-    @property
-    def _motors_ft(self) -> dict[str, type]:
-        return {f"{motor}.pos": float for motor in self.bus.motors}
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
@@ -78,11 +75,7 @@ class Follower(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        return {**self._motors_ft, **self._cameras_ft}
-
-    @cached_property
-    def action_features(self) -> dict[str, type]:
-        return self._motors_ft
+        return {**self.action_features, **self._cameras_ft}
 
     @property
     def is_connected(self) -> bool:
@@ -95,7 +88,7 @@ class Follower(Robot):
         and torque can be safely disabled to run calibration.
         """
 
-        self.bus.connect()
+        super().connect()
         if not self.is_calibrated and calibrate:
             logger.info(
                 "Mismatch between calibration values in the motor and the calibration file or no calibration file found"
@@ -107,10 +100,6 @@ class Follower(Robot):
 
         self.configure()
         logger.info(f"{self} connected.")
-
-    @property
-    def is_calibrated(self) -> bool:
-        return self.bus.is_calibrated
 
     def calibrate(self) -> None:
         if self.calibration:
@@ -170,18 +159,11 @@ class Follower(Robot):
                     self.bus.write("Protection_Current", motor, 250)  # 50% of max current to avoid burnout
                     self.bus.write("Overload_Torque", motor, 25)  # 25% torque when overloaded
 
-    def setup_motors(self) -> None:
-        for motor in reversed(self.bus.motors):
-            input(f"Connect the controller board to the '{motor}' motor only and press enter.")
-            self.bus.setup_motor(motor)
-            print(f"'{motor}' motor id set to {self.bus.motors[motor].id}")
-
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
         # Read arm position
         start = time.perf_counter()
-        obs_dict = self.bus.sync_read("Present_Position", num_retry=self.config.num_read_retries)
-        obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
+        obs_dict = self.get_action()
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
@@ -202,36 +184,8 @@ class Follower(Robot):
         return obs_dict
 
     @check_if_not_connected
-    def send_action(self, action: RobotAction) -> RobotAction:
-        """Command arm to move to a target joint configuration.
-
-        The relative action magnitude may be clipped depending on the configuration parameter
-        `max_relative_target`. In this case, the action sent differs from original action.
-        Thus, this function always returns the action actually sent.
-
-        Raises:
-            RobotDeviceNotConnectedError: if robot is not connected.
-
-        Returns:
-            RobotAction: the action sent to the motors, potentially clipped.
-        """
-
-        goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
-
-        # Cap goal position when too far away from present position.
-        # /!\ Slower fps expected due to reading from the follower.
-        if self.config.max_relative_target is not None:
-            present_pos = self.bus.sync_read("Present_Position", num_retry=self.config.num_read_retries)
-            goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
-            goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
-
-        # Send goal position to the arm
-        self.bus.sync_write("Goal_Position", goal_pos)
-        return {f"{motor}.pos": val for motor, val in goal_pos.items()}
-
-    @check_if_not_connected
     def disconnect(self):
-        self.bus.disconnect(self.config.disable_torque_on_disconnect)
+        super().disconnect(self.config.disable_torque_on_disconnect)
         for cam in self.cameras.values():
             cam.disconnect()
 

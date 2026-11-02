@@ -15,15 +15,11 @@
 # limitations under the License.
 
 import logging
-import time
-from typing import TypeAlias
 
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
-from lerobot.motors.feetech import (
-    FeetechMotorsBus,
-    OperatingMode,
-)
-from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
+from lerobot.motors.feetech import OperatingMode
+from ..MotorDriver import MotorDriver
+from lerobot.utils.decorators import check_if_already_connected
 
 from lerobot.teleoperators import Teleoperator
 from .config_leader_arm import LeaderTeleopConfig
@@ -31,44 +27,39 @@ from .config_leader_arm import LeaderTeleopConfig
 logger = logging.getLogger(__name__)
 
 
-class Leader(Teleoperator):
+class Leader(MotorDriver, Teleoperator):
     """Generic SO leader base for SO-100/101/10X teleoperators."""
 
     config_class = LeaderTeleopConfig
     name = "leader"
 
     def __init__(self, config: LeaderTeleopConfig):
-        super().__init__(config)
+        Teleoperator.__init__(self, config)
         self.config = config
-        norm_mode_body = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
-        self.bus = FeetechMotorsBus(
-            port=self.config.port,
-            motors={
-                "shoulder_pan": Motor(1, "sts3215", norm_mode_body),
-                "shoulder_lift": Motor(2, "sts3215", norm_mode_body),
-                "elbow_flex": Motor(3, "sts3215", norm_mode_body),
-                "wrist_flex": Motor(4, "sts3215", norm_mode_body),
-                "wrist_roll": Motor(5, "sts3215", norm_mode_body),
-                "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
-            },
+        norm = MotorNormMode.DEGREES if config.use_degrees else MotorNormMode.RANGE_M100_100
+        motors = {
+            name: Motor(index, "sts3215", norm)
+            for index, name in enumerate(
+                ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"),
+                start=1,
+            )
+        }
+        motors["gripper"] = Motor(6, "sts3215", MotorNormMode.RANGE_0_100)
+        MotorDriver.__init__(
+            self,
+            port=config.port,
+            motors=motors,
             calibration=self.calibration,
+            num_read_retries=0,
         )
-
-    @property
-    def action_features(self) -> dict[str, type]:
-        return {f"{motor}.pos": float for motor in self.bus.motors}
 
     @property
     def feedback_features(self) -> dict[str, type]:
         return {}
 
-    @property
-    def is_connected(self) -> bool:
-        return self.bus.is_connected
-
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
-        self.bus.connect()
+        super().connect()
         if not self.is_calibrated and calibrate:
             logger.info(
                 "Mismatch between calibration values in the motor and the calibration file or no calibration file found"
@@ -77,10 +68,6 @@ class Leader(Teleoperator):
 
         self.configure()
         logger.info(f"{self} connected.")
-
-    @property
-    def is_calibrated(self) -> bool:
-        return self.bus.is_calibrated
 
     def calibrate(self) -> None:
         if self.calibration:
@@ -131,50 +118,6 @@ class Leader(Teleoperator):
         for motor in self.bus.motors:
             self.bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
 
-    def setup_motors(self) -> None:
-        for motor in reversed(self.bus.motors):
-            input(f"Connect the controller board to the '{motor}' motor only and press enter.")
-            self.bus.setup_motor(motor)
-            print(f"'{motor}' motor id set to {self.bus.motors[motor].id}")
-
-    @check_if_not_connected
-    def get_action(self) -> dict[str, float]:
-        start = time.perf_counter()
-        action = self.bus.sync_read("Present_Position")
-        action = {f"{motor}.pos": val for motor, val in action.items()}
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read action: {dt_ms:.1f}ms")
-        return action
-
-    def get_velocity(self) -> dict[str, float]:
-        start = time.perf_counter()
-        action = self.bus.sync_read("Present_Velocity")
-        action = {f"{motor}": val for motor, val in action.items()}
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read action: {dt_ms:.1f}ms")
-        return action
-    
-    def get_current(self) -> dict[str, float]:
-        start = time.perf_counter()
-        action = self.bus.sync_read("Present_Current")
-        action = {f"{motor}": val for motor, val in action.items()}
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read action: {dt_ms:.1f}ms")
-        return action
-
-    def get_position(self) -> dict[str, float]:
-        start = time.perf_counter()
-        action = self.bus.sync_read("Present_Position")
-        action = {f"{motor}": val for motor, val in action.items()}
-        dt_ms = (time.perf_counter() - start) * 1e3
-        logger.debug(f"{self} read action: {dt_ms:.1f}ms")
-        return action
-
     def send_feedback(self, feedback: dict[str, float]) -> None:
         # TODO: Implement force feedback
         raise NotImplementedError
-
-    @check_if_not_connected
-    def disconnect(self) -> None:
-        self.bus.disconnect()
-        logger.info(f"{self} disconnected.")
