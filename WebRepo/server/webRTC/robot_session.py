@@ -23,6 +23,7 @@ class RobotSession:
         on_disconnect: Callable[[RobotSession], Awaitable[None]], 
         on_video_lost=None,
         on_control=None,
+        on_status=None,
         ):
 
         self.robot_id = robot_id
@@ -40,6 +41,8 @@ class RobotSession:
         self.on_disconnect = on_disconnect
         self.on_video_lost = on_video_lost
         self.on_control = on_control
+        self.on_status = on_status
+        self.status = None
         self.last_control_message: str | bytes | None = None
         self.session_id = uuid.uuid4().hex
         self.video_ready = asyncio.Event()
@@ -63,12 +66,19 @@ class RobotSession:
             self.connected = state == "connected" and not self._closing
             if self._closing:
                 return
-            if state == "connected" and self._disconnect_task is not None:
-                self._disconnect_task.cancel()
-            elif state == "disconnected" and self._disconnect_task is None:
-                self._disconnect_task = asyncio.create_task(self._disconnect_after_delay())
+            if state == "connected":
+                if self._disconnect_task is not None:
+                    self._disconnect_task.cancel()
+                    self._disconnect_task = None
+                await self.set_status("connected")
+            elif state == "disconnected":
+                if self._disconnect_task is None:
+                    self._disconnect_task = asyncio.create_task(self._disconnect_after_delay())
+                await self.set_status("lost")
             elif state in ("failed", "closed"):
                 self._start_close()
+                if state == "failed":
+                    await self.set_status("lost")
 
         @self.pc.on("track")
         def on_track(track): #reviewed
@@ -89,6 +99,12 @@ class RobotSession:
                     self.video_ready.clear()
                     self._video_changed.set()
                     self._notify_video_lost()
+
+    async def set_status(self, status):
+        if self.status != status:
+            self.status = status
+            if self.on_status is not None:
+                await self.on_status(self, status)
 
 #helpers
     def is_active(self, channel="control"):
@@ -310,7 +326,10 @@ class RobotSession:
                 self.video_track = None
                 if track is not None:
                     track.stop()
-                await self._notify_disconnect()
+                try:
+                    await self.set_status("confirmed_lost")
+                finally:
+                    await self._notify_disconnect()
 
     def _close_done(self, task): #reviewed
         if not task.cancelled() and task.exception() is not None:

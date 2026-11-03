@@ -5,34 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Feature 1</title>
   <link rel="stylesheet" href="./assets/base.css?v=20251214" />
-  <link rel="stylesheet" href="./assets/feature1.css?v=20261022-2" />
+  <link rel="stylesheet" href="./assets/feature1.css?v=20261102-3" />
 </head>
 <body>
   <section id="feature1" class="panel">
     <div id="feature1_top_bar">
-      <select id="tbt">
-          <option value="Control_Through_Server">Control through server</option>
-          <option value="Direct_Control">Direct control</option>
+      <label class="robot-selector" for="robotName">Robot name
+        <select id="robotName" disabled><option value="">Select robot</option></select>
+      </label>
+      <label class="robot-selector" for="robotRole">Robot role
+        <select id="robotRole" disabled><option value="">Select role</option></select>
+      </label>
+      <label class="robot-selector" for="tbt">Control:
+        <select id="tbt" disabled>
+          <option value="Control_Through_Server">through_server</option>
+          <option value="Direct_Control">directly</option>
           <option value="None" selected>None</option>
-      </select>
-      <label class="connection-toggle" title="Retry failed connections until one succeeds">
-        <input id="retryConnection" type="checkbox" role="switch" checked /> Retry connection
+        </select>
       </label>
-      <label class="connection-toggle" title="Enable sending commands to the robot">
-        <input id="masterMode" type="checkbox" role="switch" /> Master mode
-      </label>
-      <span id="latency" title="latency_avg_ms reported by the robot">Latency: N/A</span>
-      <div id = "liveData">
-        Live data (WebSocket): Waiting for data...
-      </div>
+      <p id="robotStatus" role="status">Loading robots...</p>
     </div>
 
     <!-- Main content region -->
     <div id="feature1_middle">
-
-      <div id="feature1_middle_left">
-        Left content
-      </div>
 
       <div id="feature1_middle_middle">
 
@@ -48,19 +43,22 @@
 
       </div>
 
-      <div id="feature1_middle_right">
-        Right content
-      </div>
-
     </div>
 
     <!-- Bottom bar -->
     <div id="feature_1_bottom">
-      Bottom information goes here
+      <label class="connection-toggle" title="Retry failed connections until one succeeds">
+        <input id="retryConnection" type="checkbox" role="switch" checked /> Retry connection
+      </label>
+      <label class="connection-toggle" title="Enable sending commands to the robot">
+        <input id="masterMode" type="checkbox" role="switch" disabled /> Master mode
+      </label>
+      <span id="latency" title="latency_avg_ms reported by the robot">Latency: N/A</span>
+      <div id="liveData">Waiting for data...</div>
     </div>
 
   </section>
-  <script type="module" src="./src/webrtc_setup.js?v=20261023-3"></script>
+  <script type="module" src="./src/webrtc_setup.js?v=20261102-2"></script>
   <script src="./assets/read_only.js?v=20251222"></script>
 </body>
 </html>

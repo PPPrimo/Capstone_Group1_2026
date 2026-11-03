@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -17,6 +18,7 @@ from .robot_session import RobotSession
 
 logger = logging.getLogger(__name__)
 DELETE_IF_OWNER = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end"
+PUBLISH_IF_OWNER = "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('PUBLISH', KEYS[2], ARGV[2]); return 1 else return 0 end"
 
 
 @dataclass
@@ -24,6 +26,7 @@ class RobotManager:
     robot_id: str
     relay: MediaRelay
     robot_devs: dict[str, RobotSession] = field(default_factory=dict)
+    robot_states: dict[str, str] = field(default_factory=dict)
     client_devs: dict[str, ClientSession] = field(default_factory=dict)
     redis: Any | None = None
     owner_key: str = ""
@@ -88,6 +91,7 @@ class RobotManager:
                 relay=self.relay, 
                 on_disconnect=disconnect_callback, 
                 on_video_lost=video_callback,
+                on_status=partial(self.robot_status_changed, robot_role),
                 on_control=partial(self.handle_robot_control, robot_role)) #creates a function on_control(message) equal to calling self.handle_robot_control(robot_role, message)
             robot_session.create_control_channel()
             self.robot_devs[robot_role] = robot_session
@@ -95,6 +99,8 @@ class RobotManager:
             self._update_connections()
         try:
             await self._close_sessions(existing_client, existing_robot)
+            if existing_robot is not None:
+                await robot_session.set_status("lost")
             return robot_session
         except BaseException:
             await robot_session.close()
@@ -117,6 +123,23 @@ class RobotManager:
             raise
 
 # functional helpers
+    def robot_status(self):
+        robot_name = self.robot_id.split("_", 1)[1]
+        return [{"robot_name": robot_name, "robot_role": role, "status": status}
+                for role, status in sorted(self.robot_states.items())]
+
+    async def robot_status_changed(self, robot_role, robot, status):
+        """The owning worker publishes changes from its current robot session."""
+        async with self.lock:
+            if self.robot_devs.get(robot_role) is not robot:
+                return
+            self.robot_states[robot_role] = status
+            if self.redis is not None:
+                user_id, robot_name = self.robot_id.split("_", 1)
+                message = {"robot_name": robot_name, "robot_role": robot_role, "status": status}
+                await self.redis.eval(PUBLISH_IF_OWNER, 2, self.owner_key, f"rtc:user:status:{user_id}",
+                                      self.owner_key_value, json.dumps(message))
+
     def handle_robot_control(self, robot_role: str, robot: RobotSession, message): #change this function to decide what to do when messages come in
         if not self.is_current(robot_role, robot):
             return
@@ -185,7 +208,6 @@ class RobotManager:
         async with self.lock:
             sessions = [*self.client_devs.values(), *self.robot_devs.values()]
             self.client_devs.clear()
-            self.robot_devs.clear()
             self._update_connections()
         await self._close_sessions(*sessions)
 

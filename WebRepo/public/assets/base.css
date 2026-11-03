@@ -6,7 +6,7 @@ header { display: flex; align-items: center; justify-content: space-between; pad
 .tab.active { background: #e6f2ff; border-color: #9ec5fe; }
 .logout { padding: 6px 10px; border-radius: 6px; border: 1px solid #ddd; background: #fff; color: #333; text-decoration: none; }
 .logout:hover { background: #f6f8fa; }
-.content { flex: 1 1 auto; padding: 12px; display: flex; justify-content: center; align-items: stretch; }
+.content { flex: 1 1 auto; min-height: 0; padding: 12px; display: flex; justify-content: center; align-items: stretch; }
 #panelFrame { width: 100%; height: 100%; border: 0; display: block; }
 .panel { min-height: 100vh; }
 .note { color: #666; font-size: 13px; }

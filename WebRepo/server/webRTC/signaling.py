@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -80,15 +81,70 @@ async def client_module(user: User = Depends(current_active_user)):
                         headers={"Cache-Control": "no-store"})
 
 
-async def _ws_authenticate(websocket: WebSocket, robot=False) -> User | None:
+async def _ws_authenticate(websocket: WebSocket, robot=False, cookie_only=False) -> User | None:
     async with async_session_maker() as session:
-        user = await _authenticate_slave_api_key(websocket.query_params.get("api_key"), session)
+        api_key = None if cookie_only else websocket.query_params.get("api_key")
+        user = await _authenticate_slave_api_key(api_key, session)
         token = websocket.cookies.get(COOKIE_NAME)
         if user is None and not robot and token:
             user_db = SQLAlchemyUserDatabase(session, User)
             strategy = JWTStrategy(secret=JWT_SECRET, lifetime_seconds=COOKIE_MAX_AGE)
             user = await strategy.read_token(token, UserManager(user_db))
         return user if user is not None and user.is_active else None
+
+
+@webRTC_router.websocket("/api/webrtc/robots")
+async def robot_status(websocket: WebSocket):
+    try:
+        async with asyncio.timeout(10):
+            user = await _ws_authenticate(websocket, cookie_only=True)
+    except TimeoutError:
+        user = None
+    if user is None:
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
+    if webrtc_manager is None:
+        await websocket.close(code=1013, reason="RTC service is unavailable")
+        return
+    await websocket.accept()
+    try:
+        async with _redis_client.pubsub() as pubsub:
+            # Subscribe first, so changes during the initial worker lookup are queued.
+            await webrtc_manager._subscribe(pubsub, f"rtc:user:status:{user.id}")
+
+            async def send_status():
+                robots = await webrtc_manager.user_robot_status(str(user.id))
+                states = {(robot["robot_name"], robot["robot_role"]): robot for robot in robots}
+
+                async def send_snapshot():
+                    await websocket.send_json({"type": "robot_status", "robots":
+                                               [states[key] for key in sorted(states)]})
+
+                await send_snapshot()
+                async for message in pubsub.listen():
+                    if message["type"] == "message":
+                        robot = json.loads(message["data"])
+                        states[robot["robot_name"], robot["robot_role"]] = robot
+                        await send_snapshot()
+
+            async def wait_for_disconnect():
+                async for _ in websocket.iter_text():
+                    pass
+
+            tasks = [asyncio.create_task(send_status()), asyncio.create_task(wait_for_disconnect())]
+            try:
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+    except WebSocketDisconnect:
+        pass
+    except (redis.RedisError, TimeoutError):
+        logger.exception("Robot status subscription failed for user %s", user.id)
+        await websocket.close(code=1013, reason="Robot status is temporarily unavailable")
 
 
 async def _handle_offer(websocket, user, robot_name, robot_role, peer_role):

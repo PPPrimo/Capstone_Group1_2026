@@ -5,7 +5,8 @@
 /*main layout*/
 #feature1 {
   width: 100%;
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 0;
 
   display: flex;
   flex-direction: column;
@@ -13,9 +14,11 @@
   box-sizing: border-box;
 }
 
-/*top layout*/
-#feature1_top_bar {
+/*top and bottom bars*/
+#feature1_top_bar,
+#feature_1_bottom {
   width: 100%;
+  flex-shrink: 0;
 
   /* roughly 5-10% of viewport height */
   min-height: 4vh;
@@ -33,6 +36,7 @@
   color: white;
 }
 
+.robot-selector,
 .connection-toggle {
   display: inline-flex;
   align-items: center;
@@ -66,6 +70,7 @@
 
 #latency { white-space: nowrap; font-variant-numeric: tabular-nums; }
 #liveData { min-width: 0; overflow-wrap: anywhere; }
+#robotStatus { margin: 0; overflow-wrap: anywhere; }
 
 /*middle layout*/
 #feature1_middle {
@@ -73,28 +78,16 @@
 
   /* occupy remaining vertical space */
   flex: 1;
+  min-height: 0;
 
-  display: grid;
-
-  /*
-      left   middle   right
-      10%     80%     10%
-  */
-  grid-template-columns: 10% 80% 10%;
+  display: flex;
 
   box-sizing: border-box;
-}
-
-#feature1_middle_left {
-  padding: 1rem;
-
-  box-sizing: border-box;
-
-  overflow: auto;
 }
 
 #feature1_middle_middle {
-  padding: 1rem;
+  flex: 1;
+  padding: 0;
 
   box-sizing: border-box;
 
@@ -106,59 +99,23 @@
   min-height: 0;
 }
 
-#feature1_middle_right {
-  padding: 1rem;
-
-  box-sizing: border-box;
-
-  overflow: auto;
-}
-
 .video-container {
-  aspect-ratio: 4 / 3;
-
-  /*
-     Use as much of the middle region as possible,
-     without overflowing vertically.
-  */
-  width: min(
-    100%,
-    calc(90vh * 4 / 3)
-  );
-
-  max-height: 65vh;
+  width: 100%;
+  height: 100%;
 
   background-color: black;
 
   overflow: hidden;
 
-  border-radius: 8px;
 }
 
 
-/* Video fills the 4:3 container */
+/* Fill the available region while preserving the video proportions. */
 .video-container video {
   width: 100%;
   height: 100%;
 
   display: block;
 
-  object-fit: contain;
-}
-
-/*bottom layout*/
-#feature_1_bottom {
-  width: 100%;
-
-  min-height: 4vh;
-
-  padding: 0.75rem 1.5rem;
-
-  box-sizing: border-box;
-
-  display: flex;
-  align-items: center;
-
-  background-color: #222;
-  color: white;
+  object-fit: cover;
 }

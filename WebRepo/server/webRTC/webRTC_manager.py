@@ -8,17 +8,16 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from aiortc.contrib.media import MediaRelay
 from redis.exceptions import RedisError
 
-from .robot_manager import RobotManager, DELETE_IF_OWNER
+from .robot_manager import RobotManager, DELETE_IF_OWNER, PUBLISH_IF_OWNER
 
 logger = logging.getLogger(__name__)
 REFRESH_IF_OWNER = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end"
 SET_IF_OWNER = "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3]); return 1 else return 0 end"
-PUBLISH_IF_OWNER = "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('PUBLISH', KEYS[2], ARGV[2]); return 1 else return 0 end"
 
 
 @dataclass
@@ -147,11 +146,47 @@ class WebRTCManager:
                         continue  # Queued offer from the previous worker owner.
                     if data["robot_id"] != robot_id or data["reply_channel"] != f"rtc:user:answer:{quote(robot_id, safe='')}:{data['request_id']}":
                         raise ValueError("Offer does not match its route")
+                    if data["type"] == "status":
+                        response = {"owner_token": manager.owner_key_value, "robots": manager.robot_status()}
+                        await self.redis.eval(PUBLISH_IF_OWNER, 2, manager.owner_key, data["reply_channel"],
+                                              manager.owner_key_value, json.dumps(response))
+                        continue
                     if sum(name.startswith("reply:") for name in manager.tasks) < 256:
                         manager.start_task(f"reply:{uuid.uuid4().hex}", self._reply_to_offer(manager, data, offer_processor))
         finally:
             sub_ready.clear()
             self._start_retire(manager)
+
+    async def user_robot_status(self, user_id):
+        """Read each robot's roles/status from the worker holding its lease."""
+        robots = []
+        async for owner_key in self.redis.scan_iter(match=f"rtc:user:owner:{user_id}_*"):
+            owner = await self.redis.get(owner_key)
+            if owner is None:
+                continue
+            key_id = owner_key.removeprefix("rtc:user:owner:")
+            manager = self.get_robot_manager(unquote(key_id))
+            if manager is not None and await self.is_owner(manager):
+                robots.extend(manager.robot_status())
+                continue
+            request_id = uuid.uuid4().hex
+            reply_channel = f"rtc:user:answer:{key_id}:{request_id}"
+            async with self.redis.pubsub() as pubsub:
+                await self._subscribe(pubsub, reply_channel)
+                await self.redis.publish(f"rtc:user:offer:{key_id}", json.dumps({
+                    "type": "status", "robot_id": unquote(key_id), "owner_token": owner,
+                    "request_id": request_id, "reply_channel": reply_channel,
+                }))
+                try:
+                    async with asyncio.timeout(3):
+                        while (message := await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.2)) is None:
+                            pass
+                        response = json.loads(message["data"])
+                        if response["owner_token"] == await self.redis.get(owner_key):
+                            robots.extend(response["robots"])
+                except TimeoutError:
+                    pass  # A worker can exit before its ownership lease expires.
+        return robots
 
     async def _cached_offer(self, manager, data, offer_processor): #reviewed
         request_id = data["request_id"]

@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -e
 
-PROJECT_DIR="/mnt/c/Users/tiant/Documents/1_My_folder/Projects/Capstone"
-
-cd "$PROJECT_DIR"
-
 echo "Starting Redis..."
 
 if ! redis-cli ping >/dev/null 2>&1; then
@@ -17,3 +13,8 @@ until redis-cli ping 2>/dev/null | grep -q "PONG"; do
 done
 
 echo "Redis is ready."
+
+if ! command -v turnserver >/dev/null; then
+    echo "Install coturn once: wsl.exe -d Ubuntu -u root -- apt-get install -y coturn"
+    exit 1
+fi

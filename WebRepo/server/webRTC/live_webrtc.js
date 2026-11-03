@@ -1,6 +1,6 @@
 // Browser WebRTC implementation, served through the authenticated module route.
 export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, video }) {
-    if (!el || !toggle || !retry || !master || !latency || !video || !CONFIG.robotName || !CONFIG.robotRole) {
+    if (!el || !toggle || !retry || !master || !latency || !video) {
         throw new Error('Missing WebRTC configuration or page elements.');
     }
     const setText = text => { el.textContent = text; };
@@ -15,11 +15,12 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
     let authBlocked = false;
 
     function enabled() {
-        return toggle.value !== 'None' && !paused && !authBlocked;
+        return CONFIG.robotName && CONFIG.robotRole && toggle.value !== 'None' && !paused && !authBlocked;
     }
 
     function current(s) {
-        return s !== null && session === s && enabled() && s.mode === toggle.value;
+        return s !== null && session === s && enabled() && s.mode === toggle.value
+            && s.robotName === CONFIG.robotName && s.robotRole === CONFIG.robotRole;
     }
 
     function whenCurrent(s, handler) {
@@ -150,6 +151,8 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         if (!enabled() || session) return;
         const s = {
             mode,
+            robotName: CONFIG.robotName,
+            robotRole: CONFIG.robotRole,
             pc: null,
             ws: null,
             abort: new AbortController(),
@@ -212,7 +215,7 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
 
             // Gather ICE before opening signaling to avoid the server's offer-receive timeout.
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const path = `/api/webrtc/client/offer/${encodeURIComponent(CONFIG.robotName)}/${encodeURIComponent(CONFIG.robotRole)}`;
+            const path = `/api/webrtc/client/offer/${encodeURIComponent(s.robotName)}/${encodeURIComponent(s.robotRole)}`;
             const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
             const ws = s.ws = new WebSocket(`${protocol}//${location.host}${path}`);
 
@@ -223,8 +226,8 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
                         sdp: pc.localDescription.sdp, 
                         request_id: requestId,
                         direct_control: directControl,
-                        robot_name: CONFIG.robotName,
-                        robot_role: CONFIG.robotRole
+                        robot_name: s.robotName,
+                        robot_role: s.robotRole
                 }));
                 setText('Offer sent. Waiting for server answer...');
             });
@@ -274,6 +277,7 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
             return;
         }
         if (enabled()) connect(toggle.value === 'Direct_Control');
+        else setText('Select a connected robot and role.');
     }
 
     window.liveWebRTC = {
