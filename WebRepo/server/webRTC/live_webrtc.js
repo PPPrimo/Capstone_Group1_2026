@@ -1,7 +1,9 @@
 // Browser WebRTC implementation, served through the authenticated module route.
 export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, video }) {
-    const setText = text => { if (el) el.textContent = text; };
-    if (!toggle) { setText('Missing switch #tbt.'); return; }
+    if (!el || !toggle || !retry || !master || !latency || !video || !CONFIG.robotName || !CONFIG.robotRole) {
+        throw new Error('Missing WebRTC configuration or page elements.');
+    }
+    const setText = text => { el.textContent = text; };
     toggle.value = 'None';
     retry.checked = true;
     master.checked = false;
@@ -12,15 +14,22 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
     let paused = false;
     let authBlocked = false;
 
-    function enabled() { //reviewed
-        if (toggle.value === 'None') return false;
-        if (paused) return false;
-        if (authBlocked) return false;
-        return true;
+    function enabled() {
+        return toggle.value !== 'None' && !paused && !authBlocked;
     }
-        
+
     function current(s) {
-        return session === s && enabled() && s !== null && session.mode === toggle.value;
+        return s !== null && session === s && enabled() && s.mode === toggle.value;
+    }
+
+    function whenCurrent(s, handler) {
+        return (...args) => { if (current(s)) return handler(...args); };
+    }
+
+    function connectionError(s, error) {
+        if (!current(s)) return;
+        fail(s, error.message, error.retryable === true || error instanceof DOMException);
+        if (error.retryable !== true && (error instanceof TypeError || error instanceof ReferenceError || error instanceof SyntaxError)) throw error;
     }
 
     function stopSession() { 
@@ -33,23 +42,23 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         old.abort.abort();
         clearTimeout(old.deadline);
         clearTimeout(old.disconnectTimer);
-        if (latency) latency.textContent = 'Latency: N/A';
+        latency.textContent = 'Latency: N/A';
         if (old.ws) {
             old.ws.onclose = null;
             old.ws.onerror = null;
             old.ws.close();
         }
-        if (old.pc) old.pc.close();
+        old.pc?.close();
         for (const track of old.stream.getTracks()) track.stop();
-        if (video) video.srcObject = null;
+        video.srcObject = null;
     }
 
-    function fail(s, message) { //reviewed
+    function fail(s, message, retryable = true) { //reviewed
         if (!current(s)) return;
         console.error('WebRTC connection failed:', message);
         stopSession();
-        setText(`${message} ${retry.checked ? 'Reconnecting...' : 'Enable Retry connection to reconnect.'}`);
-        if (!enabled() || !retry.checked) return;
+        setText(`${message} ${retryable && retry.checked ? 'Reconnecting...' : 'Select a connection to try again.'}`);
+        if (!retryable || !enabled() || !retry.checked) return;
         reconnectTimer = setTimeout(
             () => {reconnectTimer = null; connect(s.mode=="Direct_Control");}, 
             reconnectDelay);
@@ -94,20 +103,13 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         });
     }
 
-    async function showMessage(s, data, channel) { //reviewed
-        if (!current(s)) return;
+    async function showMessage(s, data, channel) {
         if (data instanceof Blob) data = await data.text();
         else if (data instanceof ArrayBuffer) data = new TextDecoder().decode(data);
         if (!current(s)) return;
 
-        let obj;
-        try { obj = JSON.parse(data); }
-        catch {
-            if (latency) latency.textContent = 'Latency: N/A';
-            setText(String(data)); return;
-        }
-
-        if (latency) latency.textContent = Number.isFinite(obj?.latency_avg_ms) && obj.latency_avg_ms >= 0
+        const obj = JSON.parse(data);
+        latency.textContent = Number.isFinite(obj.latency_avg_ms) && obj.latency_avg_ms >= 0
             ? `Latency: ${obj.latency_avg_ms.toFixed(2)} ms` : 'Latency: N/A';
 
         if (obj && typeof obj.timestamp === 'number' && Number.isFinite(obj.timestamp)) {
@@ -122,46 +124,21 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
     function setupChannel(s, channel) { //reviewed
         //setup the call back functions related to a channel (this is where the recieved data got used, right now it only displays them)
         channel.binaryType = 'arraybuffer';
-        channel.onopen = () => { if (current(s)) setText('DataChannel open. Waiting for data...')};
-        channel.onmessage = (event) => {
-            console.log("Received:", channel.label, event.data);
-            showMessage(s, event.data, channel).catch(
-            (error) => {if (current(s)) setText(`Cannot decode received data: ${error.message}`)}
-            )
-        };
+        channel.onopen = whenCurrent(s, () => setText('DataChannel open. Waiting for data...'));
+        channel.onmessage = whenCurrent(s, event => {
+            showMessage(s, event.data, channel).catch(error => connectionError(s, error));
+        });
         channel.onclose = () => fail(s, 'DataChannel closed.');
-        channel.onerror = (event) => {
-            const error = event.error; // RTCError when the browser provides it
-
-            console.error("DataChannel error", {
-                event,
-                name: error?.name,
-                message: error?.message,
-                detail: error?.errorDetail,
-                sctpCauseCode: error?.sctpCauseCode,
-                channelState: channel.readyState,
-                connectionState: s.pc.connectionState,
-                iceState: s.pc.iceConnectionState,
-            });
-
-            fail(s, `DataChannel failed: ${error?.message || error?.errorDetail || "unknown reason"}`);
-        };
+        channel.onerror = event => fail(s, event.error?.message || 'DataChannel failed.');
     }
 
     function attachVideo(s, track) { //reviewed
-        if (!current(s) || track.kind !== 'video') return;
-        if (!video) {
-            video = document.getElementById('remoteVideo')
-        }
-        if (!video) {
-            fail(s, 'Video stream element does exist in html');
-            return;
-        }
-
+        if (track.kind !== 'video') return;
         video.controls = true;
         s.stream.addTrack(track);
         video.srcObject = s.stream;
-        video.play().catch(() => {
+        video.play().catch(error => {
+            if (error.name !== 'NotAllowedError') throw error;
             if (current(s)) setText('Video received. Press Play to display it.');
         });
         track.addEventListener('ended', () => fail(s, 'Robot video ended.'), { once: true });
@@ -171,11 +148,6 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         //creates an offer and recieves an answer, establish the connection in the end
         const mode = directControl ? 'Direct_Control' : 'Control_Through_Server';
         if (!enabled() || session) return;
-        if (!CONFIG.robotName || !CONFIG.robotRole) {
-            setText('Configure robotName and robotRole before connecting.');
-            return;
-        }
-
         const s = {
             mode,
             pc: null,
@@ -193,7 +165,7 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
                 credentials: 'same-origin',
                 cache: 'no-store',
                 signal: s.abort.signal
-            });
+            }).catch(error => { error.retryable = true; throw error; });
             if (!current(s)) return;
             if (response.status === 401 || response.status === 403) {
                 authBlocked = true;
@@ -208,33 +180,14 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
                 throw new Error('Invalid connection settings.');
             }
             const pc = s.pc = new RTCPeerConnection({ iceServers: settings.iceServers });
-            //debuging messages to find out issues with ICE
-            pc.onicecandidate = event => {
-                console.log(
-                    "Candidate:",
-                    event.candidate?.candidate ?? "Gathering complete"
-                );
-            };
-            pc.onicecandidateerror = event => {
-                console.warn("STUN/TURN error:", {
-                    url: event.url,
-                    code: event.errorCode,
-                    text: event.errorText
-                });
-            };
-            pc.onicegatheringstatechange = () => {
-                console.log("Gathering state:", pc.iceGatheringState);
-            };
-            //end
             pc.addTransceiver('video', { direction: 'recvonly' });
             //ensures creation of teleop channel
             s.channel = pc.createDataChannel('teleop', { ordered: false, maxRetransmits: 0 });
             setupChannel(s, s.channel);
             //also handles additional channel if remote peer's offer contained it
-            pc.ondatachannel = (event) => { if (current(s)) setupChannel(s, event.channel); };
-            pc.ontrack = event => attachVideo(s, event.track);
-            pc.onconnectionstatechange = () => {
-                if (!current(s)) return;
+            pc.ondatachannel = whenCurrent(s, event => setupChannel(s, event.channel));
+            pc.ontrack = whenCurrent(s, event => attachVideo(s, event.track));
+            pc.onconnectionstatechange = whenCurrent(s, () => {
                 if (pc.connectionState === 'connected') {
                     clearTimeout(s.deadline);
                     clearTimeout(s.disconnectTimer);
@@ -249,7 +202,7 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
                 } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
                     fail(s, 'RTC connection ended.');
                 }
-            };
+            });
 
             deadline(s, 20000, 'Offer creation timed out.');
             setText('Creating offer and gathering ICE candidates...');
@@ -264,8 +217,7 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
             const ws = s.ws = new WebSocket(`${protocol}//${location.host}${path}`);
 
             deadline(s, 40000, 'Signaling timed out.');
-            ws.onopen = () => {
-                if (!current(s)) { ws.close(); return; }
+            ws.onopen = whenCurrent(s, () => {
                 ws.send(JSON.stringify({
                         type: 'offer', 
                         sdp: pc.localDescription.sdp, 
@@ -275,13 +227,12 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
                         robot_role: CONFIG.robotRole
                 }));
                 setText('Offer sent. Waiting for server answer...');
-            };
+            });
 
-            ws.onmessage = async event => {
-                if (!current(s)) return;
+            ws.onmessage = whenCurrent(s, async event => {
                 try {
                     const msg = JSON.parse(event.data);
-                    if (msg.type === 'error') throw new Error(msg.error || 'Server rejected the offer');
+                    if (msg.type === 'error') { fail(s, msg.error, msg.retryable === true); return; }
                     if (msg.type !== 'answer' || typeof msg.sdp !== 'string') throw new Error('Invalid server answer');
                     if (msg.request_id !== undefined && msg.request_id !== requestId) throw new Error('Answer request ID mismatch');
                     if (s.answerReceived) return;
@@ -293,11 +244,10 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
                     if (pc.connectionState !== 'connected') deadline(s, 30000, 'RTC connection timed out.');
                     else clearTimeout(s.deadline);
                     if (ws.readyState === WebSocket.OPEN) ws.close(1000);
-                } catch (error) { fail(s, error.message); }
-            };
+                } catch (error) { connectionError(s, error); }
+            });
 
-            ws.onclose = event => {
-                if (!current(s)) return;
+            ws.onclose = whenCurrent(s, event => {
                 if (event.code === 4401 || event.code === 4403) {
                     authBlocked = true;
                     stopSession();
@@ -305,13 +255,13 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
                 } else if (!s.answerReceived) {
                     fail(s, 'Signaling closed before receiving an answer.');
                 }
-            };
-            
-            //ws error do not block rtc
+            });
+
+            // A signaling error after the answer does not close the RTC connection.
             ws.onerror = () => {
                 if (current(s) && !s.answerReceived) fail(s, 'Signaling connection failed.');
             };
-        } catch (error) { fail(s, error.message); }
+        } catch (error) { connectionError(s, error); }
     }
 
     function syncMode() { //reviewed
@@ -323,17 +273,14 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
             setText('No connection selected.');
             return;
         }
-        if (enabled()) {
-            if (toggle.value === 'Control_Through_Server') connect(false);
-            else connect(true);
-        }
+        if (enabled()) connect(toggle.value === 'Direct_Control');
     }
 
     window.liveWebRTC = {
         refresh: syncMode,
         sendControl(message) {
             const s = session;
-            if (!master.checked || !s || !current(s) || s.channel?.readyState !== 'open') return false;
+            if (!master.checked || !current(s) || s.channel?.readyState !== 'open') return false;
             // Carry the gate with each command; teleop is unordered and may drop packets.
             s.channel.send(JSON.stringify(s.mode === 'Control_Through_Server'
                 ? { master_mode: true, command: message } : message));

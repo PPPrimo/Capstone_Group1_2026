@@ -10,6 +10,7 @@ from typing import Any, Coroutine
 from urllib.parse import quote
 
 from aiortc.contrib.media import MediaRelay
+from redis.exceptions import RedisError
 
 from .client_session import ClientSession
 from .robot_session import RobotSession
@@ -52,12 +53,19 @@ class RobotManager:
         self.offer_channel = f"rtc:user:offer:{key_id}"
         if robot_role is None:
             return
-        robot_session = self.robot_devs.get(robot_role)
-        if robot_session is None:
-            raise RuntimeError("Create the robot session before configuring its role keys")
+        robot_session = self.robot_devs[robot_role]
         robot_session.ready_key = f"rtc:user:ready:{key_id}:{quote(robot_role, safe='')}"
         robot_session.ready_key_value = f"{self.owner_key_value}:{robot_session.session_id}"
-        robot_session.owns_robot = self.owns_lease
+
+    def is_current(self, robot_role, session):
+        sessions = self.robot_devs if isinstance(session, RobotSession) else self.client_devs
+        return session is not None and not self._closing and sessions.get(robot_role) is session and not session._closing
+
+    def require_robot(self, robot_role):
+        robot = self.robot_devs.get(robot_role)
+        if robot is None or not self.is_current(robot_role, robot):
+            raise ConnectionError("robot_not_ready")
+        return robot
 
     def owns_lease(self): #reviewed
         return not self._closing and bool(self.owner_key_value) and time.monotonic() < self.lease_deadline
@@ -94,9 +102,7 @@ class RobotManager:
 
     async def create_client_session(self, robot_role: str) -> ClientSession:
         async with self.lock:
-            robot_session = self.get_robot_session(robot_role)
-            if self._closing or robot_session is None or robot_session._closing:
-                raise RuntimeError(f"No live robot session exists for role {robot_role!r}")
+            robot_session = self.require_robot(robot_role)
             old_client = self.get_client_session(robot_role)
             disconnect_callback = partial(self.remove_client_session, robot_role)
             client = ClientSession(client_id=uuid.uuid4().hex, robot=robot_session, on_disconnect=disconnect_callback)
@@ -111,8 +117,8 @@ class RobotManager:
             raise
 
 # functional helpers
-    def handle_robot_control(self, robot_role: str, robot: RobotSession, message):
-        if self._closing or self.get_robot_session(robot_role) is not robot:
+    def handle_robot_control(self, robot_role: str, robot: RobotSession, message): #change this function to decide what to do when messages come in
+        if not self.is_current(robot_role, robot):
             return
         client = self.get_client_session(robot_role)
         if client is not None and client.robot is robot:
@@ -160,7 +166,7 @@ class RobotManager:
             try:
                 async with asyncio.timeout(3):
                     await self.redis.eval(DELETE_IF_OWNER, 1, robot.ready_key, robot.ready_key_value)
-            except Exception:
+            except (RedisError, TimeoutError):
                 logger.exception("Could not clear robot readiness; its TTL will expire")
 
     async def _close_sessions(self, *sessions): #reviewed
@@ -185,10 +191,6 @@ class RobotManager:
 
 # task helpers start
     def start_task(self, name: str, coroutine: Coroutine) -> asyncio.Task: #reviewed
-        existing = self.tasks.get(name)
-        if self._closing or (existing is not None and not existing.done()):
-            coroutine.close()
-            raise RuntimeError(f"Cannot start manager task {name!r}")
         task = asyncio.create_task(coroutine)
         self.tasks[name] = task
         task.add_done_callback(lambda done: self._task_done(name, done))
@@ -205,8 +207,7 @@ class RobotManager:
         self.tasks.clear()
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 # task helpers start
 
 #direct connection feature start
@@ -215,18 +216,17 @@ class RobotManager:
             async with asyncio.timeout(35):
                 while not state["connected"].is_set():
                     state["changed"].clear()
-                    if robot.direct_pending is not state or state["error"] or not robot.direct_ready():
-                        raise RuntimeError("Direct negotiation ended")
+                    if robot.direct_pending is not state or state["error"] or not robot.is_active("both"):
+                        raise ConnectionError("Direct negotiation ended")
                     robot.send_auxiliary({"ident": "R_Ack", "ngoID": state["id"], "sessID": robot.session_id})
                     try:
                         await asyncio.wait_for(state["changed"].wait(), 0.5)
                     except TimeoutError:
                         pass
-        except (TimeoutError, RuntimeError) as error:
+        except (TimeoutError, ConnectionError) as error:
             logger.error(self.logger_start + "cancel direct negotiation due to: " + str(error))
             self._cancel_direct(robot, state)
         except asyncio.CancelledError:
-            logger.critical(self.logger_start + "cancel direct negotiation, a asyncio cancelled error happened")
             self._cancel_direct(robot, state)
             raise
 
@@ -239,14 +239,11 @@ class RobotManager:
         if robot.direct_pending is state:
             robot.direct_pending = None
             robot.client_ctrl = "F"
-            robot.auxiliary_messages.clear()
         if not state["answer"].done():
             state["answer"].cancel()
 
     async def relay_user_offer(self, robot_role, offer, request_id, timeout=20): #reviewed
-        robot = self.get_robot_session(robot_role)
-        if robot is None or not self.owns_lease() or not robot.direct_ready():
-            raise RuntimeError("robot_not_ready")
+        robot = self.require_robot(robot_role)
         state = {
             "id": request_id, 
             "answer": asyncio.get_running_loop().create_future(), 
@@ -268,10 +265,10 @@ class RobotManager:
                 while True:
                     #session checks
                     state["changed"].clear()
-                    if self.get_robot_session(robot_role) is not robot or not self.owns_lease() or not robot.direct_ready():
-                        raise RuntimeError("robot_not_ready")
+                    if not self.is_current(robot_role, robot) or not self.owns_lease() or not robot.is_active("both"):
+                        raise ConnectionError("robot_not_ready")
                     if state["error"]:
-                        raise RuntimeError(state["error"])
+                        raise ConnectionError(state["error"])
                     #process
                     if state["answer"].done():
                         answer = state["answer"].result()

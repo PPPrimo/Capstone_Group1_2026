@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 
 from aiortc import RTCPeerConnection, RTCDataChannel
 from aiortc.contrib.media import MediaRelay
+from aiortc.exceptions import InvalidStateError
 from .ice_config import peer_configuration
 
 logger = logging.getLogger(__name__)
@@ -28,10 +31,8 @@ class RobotSession:
         self.pc = RTCPeerConnection(peer_configuration(f"robot:{robot_id}"))
         self.control_channel: RTCDataChannel | None = None
         self.auxiliary_channel: RTCDataChannel | None = None
-        self.auxiliary_messages = {}
         self.direct_pending = None
         self.direct_requests = {}
-        self.owns_robot: Callable[[], bool] = lambda: False
         self.client_ctrl = "F"
         self.server_override = False
         self.video_track = None
@@ -90,27 +91,21 @@ class RobotSession:
                     self._notify_video_lost()
 
 #helpers
-    def direct_ready(self): #reviewed
-        return self._can_control("both")
-    
-    def _can_control(self, channel="control") -> bool: #reviewed
-        if channel not in ("control", "auxiliary", "both"):
-            raise ValueError("Unknown channel selection")
+    def is_active(self, channel="control"):
+        channels = {"control": (self.control_channel,), "auxiliary": (self.auxiliary_channel,),
+                    "both": (self.control_channel, self.auxiliary_channel)}[channel]
+        return not self._closing and self.pc.connectionState == "connected" and all(
+            item is not None and item.readyState == "open" for item in channels)
 
-        is_active = not self._closing
-        is_connected = self.pc.connectionState == "connected"
-        control_ready = self.control_channel is not None and self.control_channel.readyState == "open"
-        auxiliary_ready = self.auxiliary_channel is not None and self.auxiliary_channel.readyState == "open"
-        owns_robot = self.owns_robot()
-        if channel == "control":
-            channel_ready = control_ready
-        elif channel == "auxiliary":
-            channel_ready = auxiliary_ready
-        else:
-            channel_ready = control_ready and auxiliary_ready
-
-        result = is_active and is_connected and channel_ready
-        return result
+    def _negotiation(self, message):
+        if message["sessID"] != self.session_id:
+            raise ValueError("Message belongs to another robot session")
+        state = self.direct_requests.get(message["ngoID"])
+        if state is None or state.get("ended"):
+            return None  # Late acknowledgement for an expired/replaced negotiation.
+        if state["connected"].is_set() and message["ident"] != "R_Sts":
+            return None
+        return state
 
     def _notify_video_lost(self): #reviewed
         if not self._closing and self.on_video_lost is not None:
@@ -131,12 +126,10 @@ class RobotSession:
                 self._disconnect_task = None
 
     def _prepare_RTC_message(self, identifier, source, message):
-        import json
         if source not in ("user", "server"):
             raise ValueError("Unknown command source")
         binary = isinstance(message, bytes)
         if binary:
-            import base64
             message = base64.b64encode(message).decode("ascii")
         payload = json.dumps({
             "identifier": identifier, 
@@ -145,86 +138,53 @@ class RobotSession:
             "command": message}, 
             allow_nan=False)
         if len(payload.encode("utf-8")) > 16384:
-            logger.warning(self.logger_start+"oversized payload")
-            return False
+            raise ValueError("Control message exceeds 16 KiB")
         return payload
     
-    def _receive_auxiliary(self, payload): #reviewed, need to repurpose to allow multi identifier
-        "R_Off: Relay_Offer, R_Ans: Relay_Answer, R_Sts: Relay_Status, R_Err: Relay_Error, R_Cnf: Relay_Confirmation"
-        import json
-        if not isinstance(payload, (str, bytes)) or len(payload) > 65536:
+    def _receive_auxiliary(self, payload):
+        if self._closing:
             return
-        try:
-            message = json.loads(payload)
-            if not isinstance(message, dict):
-                return
-            identifier = message.get("ident")
-            state = self.direct_requests.get(message.get("ngoID"))
-            #duplication check
-            if state is None or state.get("ended") or message.get("sessID") != self.session_id:
-                logger.warning(self.logger_start+"negotiation or session id missmatch")
-                return
-            #processing
-            if identifier in ("R_Rdy", "R_Ans") and self.direct_pending is not state:
-                previous = self.direct_pending
-                if previous is not None:
-                    previous["error"] = "Connection replaced by another user"
-                    previous["ended"] = True
-                    previous["changed"].set()
-                    self.direct_requests.pop(previous["id"], None)
-                self.direct_pending = state
-                self.client_ctrl = "F"
-            if identifier == "R_Sts":
-                status = message.get("clntCtrl")
-                if status not in ("T", "F"):
-                    logger.warning(self.logger_start+"invalid connection status response")
-                    return
-                if status == "T" and not state["answer"].done():
-                    logger.info(self.logger_start+"ignored message, a negotiation is active")
-                    return
-                #confirmed direct control answer recieved
-                self.client_ctrl = status
-                self.send_auxiliary({"ident": "R_Cnf", "ngoID": state["id"], "sessID": self.session_id, "clntCtrl": status})
-                if status == "T":
-                    state["connected"].set()
-                    self.auxiliary_messages.clear()
-                else:
-                    state["error"] = "Direct client disconnected"
-                    state["ended"] = True
-                    self.direct_requests.pop(state["id"], None)
-                state["changed"].set()
-                return
-            if state["connected"].is_set() or state.get("ended"):
-                logger.info(self.logger_start+"ignored message, negotiation ended or completed")
-                return
-            if identifier == "R_Rdy" and message.get("ready") is True:
-                state["received"].set()
-            elif identifier == "R_Err":
-                state["error"] = str(message.get("error", "Robot rejected negotiation"))
-                logger.warning(self.logger_start+"Robot rejected negotiation")
-            elif identifier == "R_Ans":
-                answer = message.get("answer")
-                if not isinstance(answer, dict) or answer.get("type") != "answer" or not isinstance(answer.get("sdp"), str) or len(answer["sdp"].encode("utf-8")) > 48000 or not answer["sdp"].startswith("v=0"):
-                    return
-                # A valid answer is also an implicit receipt/readiness confirmation.
-                state["received"].set()
-                if not state["answer"].done():
-                    state["answer"].set_result(answer)
-            state["changed"].set()
-            self.auxiliary_messages[identifier] = message #redundent
-
-        except (ValueError, TypeError, KeyError):
+        message = json.loads(payload)
+        state = self._negotiation(message)
+        if state is None:
             return
+        identifier = message["ident"]
+        if identifier in ("R_Rdy", "R_Ans") and self.direct_pending is not state:
+            previous = self.direct_pending
+            if previous is not None:
+                previous.update(error="Connection replaced by another user", ended=True)
+                previous["changed"].set()
+                self.direct_requests.pop(previous["id"], None)
+            self.direct_pending = state
+            self.client_ctrl = "F"
+        if identifier == "R_Sts":
+            status = message["clntCtrl"]
+            if status == "T" and not state["answer"].done():
+                raise ValueError("Robot reported connected before answering")
+            self.client_ctrl = status
+            self.send_auxiliary({"ident": "R_Cnf", "ngoID": state["id"], "sessID": self.session_id, "clntCtrl": status})
+            if status == "T":
+                state["connected"].set()
+            else:
+                state.update(error="Direct client disconnected", ended=True)
+                self.direct_requests.pop(state["id"], None)
+        elif identifier == "R_Rdy":
+            state["received"].set()
+        elif identifier == "R_Err":
+            state["error"] = message["error"]
+        elif identifier == "R_Ans":
+            state["received"].set()
+            if not state["answer"].done():
+                state["answer"].set_result(message["answer"])
+        else:
+            raise ValueError(f"Unknown robot message: {identifier}")
+        state["changed"].set()
 
 # control functions
     def _receive_control(self, message):
-        if self._closing or not isinstance(message, (str, bytes)):
-            return
-        size = len(message.encode("utf-8")) if isinstance(message, str) else len(message)
-        if size > 16384:
+        if self._closing:
             return
         self.last_control_message = message
-        logger.debug("%sreceived robot telemetry (%d bytes)", self.logger_start, size)
         if self.on_control is not None:
             self.on_control(self, message)
 
@@ -242,37 +202,31 @@ class RobotSession:
 
     def send_control(self, message, source="user"): #reviewed
         payload = self._prepare_RTC_message("CMD", source, message)
-        if self._can_control() and payload is not False:
+        if self.is_active():
             self.control_channel.send(payload)
             return True
         return False
 
-    def send_auxiliary(self, message): #To Be Redesigned
-        import json
-        channel = self.auxiliary_channel
-        if not self._can_control("auxiliary"):
-            logger.info(self.logger_start+"can't control")        
+    def send_auxiliary(self, message):
+        if not self.is_active("auxiliary"):
             return False
         payload = json.dumps({**message, "server_override": self.server_override}, separators=(",", ":"), allow_nan=False)
         size = len(payload.encode("utf-8"))
         if size > 65536:
             raise ValueError("Auxiliary message exceeds 64 KiB")
-        if channel.bufferedAmount + size > 262144:
-            logger.warning(self.logger_start+"oversized aux message")
+        if self.auxiliary_channel.bufferedAmount + size > 262144:
             return False
         try:
-            channel.send(payload)
-            return True
-        except Exception as error:
-            logger.critical(self.logger_start+"send_auxiliary() - "+ str(error))
-            return False
-        
+            self.auxiliary_channel.send(payload)
+        except InvalidStateError:
+            return False  # Transport closed between checking and sending.
+        return True
+
     def set_server_override(self, enabled): #reviewed
         if type(enabled) is not bool:
-            logger.error(self.logger_start+"invalid server override format")
             raise ValueError("server_override must be a boolean")
         self.server_override = enabled
-        return self.send_auxiliary({"ident": "SO"})
+        return self.send_auxiliary({"ident": "S_ovr"})
 
 # video functions
     async def wait_for_video(self, timeout: float = 10): #reviewed
@@ -292,10 +246,6 @@ class RobotSession:
 
 # task helpers
     def start_task(self, name: str, coroutine: Coroutine) -> asyncio.Task: #reviewed
-        existing = self.tasks.get(name)
-        if self._closing or (existing is not None and not existing.done()):
-            coroutine.close()
-            raise RuntimeError(f"Task already existed or robot is closing {name!r}")
         task = asyncio.create_task(coroutine)
         self.tasks[name] = task
         task.add_done_callback(lambda done: self._task_done(name, done))
@@ -312,8 +262,7 @@ class RobotSession:
         self.tasks.clear()
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 # termination
     async def close(self): #reviewed
@@ -341,7 +290,6 @@ class RobotSession:
             state["error"] = "Robot disconnected"
             state["changed"].set()
         self.client_ctrl = "F"
-        self.auxiliary_messages.clear()
         try:
             timer = self._disconnect_task
             self._disconnect_task = None

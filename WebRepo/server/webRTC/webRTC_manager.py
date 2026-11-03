@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import quote
 
 from aiortc.contrib.media import MediaRelay
+from redis.exceptions import RedisError
 
 from .robot_manager import RobotManager, DELETE_IF_OWNER
 
@@ -55,9 +56,13 @@ class WebRTCManager:
         async with asyncio.timeout(3):
             return await self.redis.get(manager.owner_key) == manager.owner_key_value
 
+    async def require_owner(self, manager):
+        if self._closing or manager is None or not await self.is_owner(manager):
+            raise ConnectionError("Robot ownership changed")
+
     async def acquire_worker(self, robot_id: str) -> bool: #reviewed
         if self.redis is None or self._closing:
-            raise RuntimeError("Redis is unavailable or this worker is closing")
+            raise ConnectionError("Redis is unavailable or this worker is closing")
         async with self.lock:
             manager = self.create_robot_manager(robot_id)
             if manager._closing:
@@ -93,17 +98,14 @@ class WebRTCManager:
                         if not await self.redis.eval(SET_IF_OWNER, 2, manager.owner_key, manager.announce_key, manager.owner_key_value, manager.owner_key_value, self.lease_ttl):
                             return
                 await asyncio.sleep(self.lease_ttl / 3)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
+        except (RedisError, TimeoutError) as error:
             logger.exception(manager.logger_start + "Robot ownership renewal failed due to: " + str(error))
         finally:
             self._start_retire(manager)
 
     async def prepare_owner_session(self, robot_id: str, robot_role: str, offer_processor, wait_robot_ready: bool = False): #reviewed
         manager = self.get_robot_manager(robot_id)
-        if manager is None or not await self.is_owner(manager):
-            raise RuntimeError("This worker does not own the robot")
+        await self.require_owner(manager)
         async with manager.prepare_lock:
             listener = manager.tasks.get("listener")
             if listener is None:
@@ -111,12 +113,12 @@ class WebRTCManager:
             async with asyncio.timeout(5):
                 while not manager.sub_ready.is_set():
                     if listener.done() or manager._closing:
-                        raise RuntimeError("Robot offer listener failed to start")
+                        raise ConnectionError("Robot offer listener failed to start")
                     await asyncio.sleep(0.02)
         if wait_robot_ready:
             robot = manager.get_robot_session(robot_role)
             if robot is None:
-                raise RuntimeError("Robot role is offline")
+                raise ConnectionError("Robot role is offline")
             await robot.wait_for_video(timeout=10)
 
     async def _subscribe(self, pubsub, channel): #reviewed
@@ -135,80 +137,21 @@ class WebRTCManager:
                 async with asyncio.timeout(3):
                     announced = await self.redis.eval(SET_IF_OWNER, 2, manager.owner_key, manager.announce_key, manager.owner_key_value, manager.owner_key_value, self.lease_ttl)
                 if not announced:
-                    raise RuntimeError("Ownership changed while subscribing")
+                    raise ConnectionError("Ownership changed while subscribing")
                 sub_ready.set()
                 async for message in pubsub.listen():
                     if message["type"] != "message" or manager._closing:
                         continue
-                    try:
-                        data = json.loads(message["data"])
-                        if not isinstance(data, dict) or data.get("type") != "offer":
-                            continue
-                        if data.get("robot_id") != robot_id or data.get("owner_token") != manager.owner_key_value:
-                            continue
-                        request_id = data.get("request_id")
-                        self._validate_name(request_id, "request_id")
-                        self._validate_name(data.get("robot_role"), "robot_role")
-                        if data.get("reply_channel") != f"rtc:user:answer:{quote(robot_id, safe='')}:{request_id}":
-                            continue
-                        if sum(name.startswith("reply:") for name in manager.tasks) >= 256:
-                            continue
+                    data = json.loads(message["data"])
+                    if data["owner_token"] != manager.owner_key_value:
+                        continue  # Queued offer from the previous worker owner.
+                    if data["robot_id"] != robot_id or data["reply_channel"] != f"rtc:user:answer:{quote(robot_id, safe='')}:{data['request_id']}":
+                        raise ValueError("Offer does not match its route")
+                    if sum(name.startswith("reply:") for name in manager.tasks) < 256:
                         manager.start_task(f"reply:{uuid.uuid4().hex}", self._reply_to_offer(manager, data, offer_processor))
-                    except (ValueError, TypeError, KeyError) as error:
-                        logger.warning(manager.logger_start + "Ignoring malformed RTC offer message, details: " + str(error))
         finally:
             sub_ready.clear()
             self._start_retire(manager)
-
-    async def handle_usr_offer(self, robot_id, robot_role, offer, offer_processor, request_id): #reviewed
-        self._validate_name(robot_role, "robot_role")
-        self._validate_name(request_id, "request_id")
-        offer_processor.validate_offer("ServerClient", offer)
-        if self._closing or self.redis is None:
-            raise RuntimeError("RTC service is unavailable")
-        key_id = quote(robot_id, safe="")
-        owner_key = f"rtc:user:owner:{key_id}"
-        reply_channel = f"rtc:user:answer:{key_id}:{request_id}"
-        async with asyncio.timeout(self.request_timeout):
-            owner = await self.redis.get(owner_key)
-            if owner is None:
-                return {"type": "error", "error": "robot_not_ready", "retryable": True, "request_id": request_id}
-            data = {"type": "offer", "role": "ServerClient", "robot_id": robot_id, "robot_role": robot_role, "request_id": request_id, "owner_token": owner, "reply_channel": reply_channel, "offer": offer}
-            local = self.get_robot_manager(robot_id)
-            #current worker owns the robot
-            if local is not None and local.owner_key_value == owner and await self.is_owner(local):
-                response, _ = await self._cached_offer(local, data, offer_processor)
-            #other worker owns the robot, use redis to transfer offer
-            else:
-                async with self.redis.pubsub() as pubsub:
-                    await self._subscribe(pubsub, reply_channel)
-                    last_publish = 0
-                    while True:
-                        if self._closing or await self.redis.get(owner_key) != owner:
-                            raise RuntimeError("Robot owner changed; retry with a new request_id")
-                        if await self.redis.get(f"rtc:user:announce:{key_id}") != owner:
-                            return {"type": "error", "error": "robot_not_ready", "retryable": True, "request_id": request_id}
-                        if time.monotonic() - last_publish >= 1:
-                            await self.redis.publish(f"rtc:user:offer:{key_id}", json.dumps(data))
-                            last_publish = time.monotonic()
-                        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.2)
-                        if message is None:
-                            continue
-                        try:
-                            response = json.loads(message["data"])
-                            expected = {"request_id": request_id, "robot_id": robot_id, "robot_role": robot_role, "role": "ServerClient", "owner_token": owner}
-                            if not isinstance(response, dict) or any(response.get(k) != v for k, v in expected.items()):
-                                continue
-                            if response.get("type") in ("answer", "error"):
-                                break
-                        except (ValueError, TypeError, KeyError) as error:
-                            logger.warning(f"id: {robot_id} | role: {robot_role} | handle_user_offer() - " + str(error))
-                            continue
-            if await self.redis.get(owner_key) != owner:
-                raise RuntimeError("Robot owner changed before answer delivery")
-            if response.get("type") == "error":
-                return {"type": "error", "error": response["error"], "retryable": response.get("retryable", True), "request_id": request_id}
-            return {**response["answer"], "request_id": request_id, "session_id": response["session_id"], "owner_token": owner, "direct_control": True}
 
     async def _cached_offer(self, manager, data, offer_processor): #reviewed
         request_id = data["request_id"]
@@ -236,40 +179,39 @@ class WebRTCManager:
         if session is not None and session._closing:
             return {"type": "error", "error": "Session ended; use a new request_id", "retryable": True}, None
         
-        if session is not None and isinstance(data.get("offer"), dict) and data["offer"].get("direct_control"):
+        if session is not None and data["offer"].get("direct_control"):
             state = session.direct_pending
             if state is None or state["id"] != request_id or state.get("ended"):
                 return {"type": "error", "error": "Negotiation ended; use a new request_id", "retryable": True}, None
         return response, session
     
-    async def _reply_to_offer(self, manager, data, offer_processor): #reviewed
-        response, session = await self._cached_offer(manager, data, offer_processor)
-        response = {**response, "request_id": data["request_id"], "robot_id": manager.robot_id, "robot_role": data["robot_role"], "role": data.get("role"), "owner_token": manager.owner_key_value}
+    async def _reply_to_offer(self, manager, data, offer_processor):
+        response = {"type": "error", "error": "RTC offer processing failed", "retryable": False}
         try:
+            response, _ = await self._cached_offer(manager, data, offer_processor)
+        except (ConnectionError, TimeoutError, RedisError) as error:
+            response = {"type": "error", "error": str(error) or "RTC timed out", "retryable": True}
+        finally:
+            # Also notify the caller if a programming error propagates out of this task.
+            response.update(request_id=data["request_id"], robot_id=manager.robot_id,
+                            robot_role=data["robot_role"], role=data["role"], owner_token=manager.owner_key_value)
             async with asyncio.timeout(3):
-                published = await self.redis.eval(PUBLISH_IF_OWNER, 2, manager.owner_key, data["reply_channel"], manager.owner_key_value, json.dumps(response))
+                published = await self.redis.eval(PUBLISH_IF_OWNER, 2, manager.owner_key,
+                                                 data["reply_channel"], manager.owner_key_value, json.dumps(response))
             if not published:
                 self._start_retire(manager)
-        except Exception:
-            self._start_retire(manager)
-            raise
 
     async def _execute_offer(self, manager, data, offer_processor): #reviewed
         session = None
-        direct = isinstance(data.get("offer"), dict) and data["offer"].get("direct_control") is True
+        direct = data["offer"].get("direct_control", False)
         try:
-            offer_processor.validate_offer(data.get("role"), data.get("offer"))
-            if not await self.is_owner(manager):
-                raise RuntimeError("Robot ownership changed")
+            await self.require_owner(manager)
             if direct:
                 session = manager.get_robot_session(data["robot_role"])
-                if session is None or not session.direct_ready():
-                    raise RuntimeError("robot_not_ready")
                 answer = await manager.relay_user_offer(data["robot_role"], data["offer"], data["request_id"], self.offer_timeout)
             else:
                 session, answer = await offer_processor.process(data.get("role"), manager.robot_id, data["robot_role"], data.get("offer"))
-            if not await self.is_owner(manager):
-                raise RuntimeError("Robot ownership changed during negotiation")
+            await self.require_owner(manager)
             
             return {
                 "type": "answer", 
@@ -277,21 +219,10 @@ class WebRTCManager:
                 "session_id": getattr(session, "session_id", getattr(session, "client_id", None))
                 }, session
         
-        except asyncio.CancelledError:
-            if session is not None and not direct: #direct session is handled by robot_manager
-                await session.close()
-            raise
-        except Exception as exc:
+        except BaseException:
             if session is not None and not direct:
                 await session.close()
-            logger.warning(manager.logger_start + "RTC offer failed due to: " + str(exc))
-
-            return {
-                "type": "error", 
-                "error": str(exc) or type(exc).__name__, 
-                "retryable": not isinstance(exc, ValueError)
-                }, None
-        
+            raise
         finally:
             manager.pending_offers -= 1
             manager.last_activity = time.monotonic()
@@ -308,9 +239,7 @@ class WebRTCManager:
                 else:
                     await manager.clear_ready(robot)
                 await asyncio.sleep(min(1, self.lease_ttl / 3))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
+        except (RedisError, TimeoutError):
             self._start_retire(manager)
             raise
         finally:
@@ -321,13 +250,11 @@ class WebRTCManager:
         if not isinstance(value, str) or not value or len(value) > 128 or any(not (c.isalnum() or c in "_-") for c in value):
             raise ValueError(f"Invalid {name}; use 1-128 letters, digits, underscores(_) or hyphens(-)")
 
-    async def route_offer(self, peer_role, robot_id, robot_role, offer, offer_processor, request_id=None): #reviewed
+    async def route_offer(self, peer_role, robot_id, robot_role, offer, offer_processor, request_id=None):
         self._validate_name(robot_role, "robot_role")
         request_id = request_id or uuid.uuid4().hex
         self._validate_name(request_id, "request_id")
         offer_processor.validate_offer(peer_role, offer)
-        if self._closing:
-            raise RuntimeError("This worker is shutting down")
         key_id = quote(robot_id, safe="")
         owner_key = f"rtc:user:owner:{key_id}"
         announce_key = f"rtc:user:announce:{key_id}"
@@ -335,47 +262,44 @@ class WebRTCManager:
         reply_channel = f"rtc:user:answer:{key_id}:{request_id}"
         published_owner = None
         last_publish = 0
-        async with asyncio.timeout(self.request_timeout):
-            async with self.redis.pubsub() as pubsub:
-                await self._subscribe(pubsub, reply_channel)
-                while True:
-                    if self._closing: #closing
-                        raise RuntimeError("This worker is shutting down")
-                    owner = await self.redis.get(owner_key)
-                    if published_owner is not None and owner != published_owner: #the worker originally owning the robot id changed
-                        raise RuntimeError("Owner changed; reconnect with a new offer and request_id")
-                    local = self.get_robot_manager(robot_id)
-                    if owner is None and peer_role == "MobileRobot": #no worker owns the robot id
-                        if await self.acquire_worker(robot_id): #claiming ownership
-                            await self.prepare_owner_session(robot_id, robot_role, offer_processor) #next stage
-                        await asyncio.sleep(0.02)
-                        continue
-                    if owner is None: #non robot offer comes before robot offer
-                        raise RuntimeError("Robot is offline")
-                    if local is not None and local.owner_key_value == owner and not local._closing: #when non robot offer comes after robot connects
-                        await self.prepare_owner_session(robot_id, robot_role, offer_processor) #next stage
-                    if await self.redis.get(announce_key) == owner and time.monotonic() - last_publish >= 1: #when owner confirmed subing to redis, publish the recieved offer
-                        data = {"type": "offer", "role": peer_role, "robot_id": robot_id, "robot_role": robot_role, "request_id": request_id, "owner_token": owner, "reply_channel": reply_channel, "offer": offer}
-                        await self.redis.publish(channel, json.dumps(data))
-                        published_owner = owner
-                        last_publish = time.monotonic()
-                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.2) #await message
-                    if message is None:
-                        continue
-                    try: #pass out the processed offer answer
-                        response = json.loads(message["data"])
-                        if not isinstance(response, dict):
-                            continue
-                        if any(response.get(key) != value for key, value in {"request_id": request_id, "robot_id": robot_id, "robot_role": robot_role, "role": peer_role, "owner_token": published_owner}.items()):
-                            continue
-                        if await self.redis.get(owner_key) != published_owner:
-                            raise RuntimeError("Owner changed before answer delivery; reconnect")
-                        if response.get("type") == "error":
-                            raise RuntimeError(response.get("error", "RTC negotiation failed"))
-                        if response.get("type") == "answer":
-                            return {**response["answer"], "request_id": request_id, "session_id": response["session_id"], "owner_token": published_owner}
-                    except (ValueError, TypeError, KeyError) as error:
-                        logger.warning(f"id: {robot_id} | role: {robot_role} | router_offer() - Ignoring malformed RTC reply, details at: ", str(error))
+        async with asyncio.timeout(self.request_timeout), self.redis.pubsub() as pubsub:
+            await self._subscribe(pubsub, reply_channel)
+            while True:
+                if self._closing:
+                    raise ConnectionError("This worker is shutting down")
+                owner = await self.redis.get(owner_key)
+                if published_owner is not None and owner != published_owner:
+                    raise ConnectionError("Owner changed; reconnect with a new request_id")
+                if owner is None:
+                    if peer_role == "ServerClient":
+                        return {"type": "error", "error": "robot_not_ready", "retryable": True, "request_id": request_id}
+                    if await self.acquire_worker(robot_id):
+                        await self.prepare_owner_session(robot_id, robot_role, offer_processor)
+                    await asyncio.sleep(0.02)
+                    continue
+                local = self.get_robot_manager(robot_id)
+                if local is not None and local.owner_key_value == owner and not local._closing:
+                    await self.prepare_owner_session(robot_id, robot_role, offer_processor)
+                if await self.redis.get(announce_key) == owner and time.monotonic() - last_publish >= 1:
+                    data = {"type": "offer", "role": peer_role, "robot_id": robot_id, "robot_role": robot_role,
+                            "request_id": request_id, "owner_token": owner, "reply_channel": reply_channel, "offer": offer}
+                    await self.redis.publish(channel, json.dumps(data))
+                    published_owner = owner
+                    last_publish = time.monotonic()
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.2)
+                if message is None:
+                    continue
+                response = json.loads(message["data"])
+                expected = {"request_id": request_id, "robot_id": robot_id, "robot_role": robot_role,
+                            "role": peer_role, "owner_token": published_owner}
+                if any(response[key] != value for key, value in expected.items()):
+                    raise ValueError("Reply does not match its request")
+                if await self.redis.get(owner_key) != published_owner:
+                    raise ConnectionError("Owner changed before answer delivery")
+                if response["type"] == "error":
+                    return {"type": "error", "error": response["error"], "retryable": response["retryable"], "request_id": request_id}
+                return {**response["answer"], "request_id": request_id, "session_id": response["session_id"],
+                        "owner_token": published_owner, "direct_control": offer.get("direct_control", False)}
 
     async def _wait_until_set(self, redis, key: str, timeout: float = 10): #reviewed
         async with asyncio.timeout(timeout):
@@ -407,7 +331,7 @@ class WebRTCManager:
                 async with asyncio.timeout(3):
                     await self.redis.eval(DELETE_IF_OWNER, 1, manager.announce_key, manager.owner_key_value)
                     await self.redis.eval(DELETE_IF_OWNER, 1, manager.owner_key, manager.owner_key_value)
-            except Exception:
+            except (RedisError, TimeoutError):
                 logger.exception("Could not release ownership; its TTL will expire")
             if self.robot_lists.get(manager.robot_id) is manager:
                 self.robot_lists.pop(manager.robot_id, None)

@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING
 
 from aiortc import RTCPeerConnection, RTCDataChannel
+from aiortc.exceptions import InvalidStateError
 from .ice_config import peer_configuration
 
 if TYPE_CHECKING:
@@ -36,16 +37,7 @@ class ClientSession:
             if channel.label == "teleop" and not self._closing:
                 self.control_channel = channel
 
-                @channel.on("message")
-                def on_message(message):
-                    if self._closing or self.robot is None or not isinstance(message, (str, bytes)) or len(message) > 16384:
-                        return
-                    try:
-                        control = json.loads(message)
-                        if isinstance(control, dict) and control.get("master_mode") is True and "command" in control:
-                            self.robot.send_control(json.dumps(control["command"], allow_nan=False))
-                    except (ValueError, TypeError):
-                        return
+                channel.on("message", self._receive_control)
 
         @self.pc.on("connectionstatechange")
         async def on_connectionstatechange():
@@ -69,47 +61,45 @@ class ClientSession:
             if self._disconnect_task is asyncio.current_task():
                 self._disconnect_task = None
 
-    def set_robot(self, robot: RobotSession):
-        if self._closing or (self._video_track is not None and self.robot is not robot):
-            raise RuntimeError("Close and recreate the client before changing its video source")
-        self.robot = robot
+    def is_active(self):
+        return (not self._closing and self.pc.connectionState == "connected"
+                and self.control_channel is not None and self.control_channel.readyState == "open")
 
-    def send_control(self, message: str | bytes) -> bool:
-        """Forward robot telemetry unchanged to this browser."""
-        channel = self.control_channel
-        if self._closing or channel is None or channel.readyState != "open":
-            return False
+    def _receive_control(self, message):
+        if not self.is_active():
+            return
+        try:
+            control = json.loads(message)
+            if not isinstance(control, dict) or control.get("master_mode") is not True:
+                return
+            command = json.dumps(control["command"], allow_nan=False)
+        except (ValueError, KeyError, TypeError) as error:
+            logger.warning("Invalid browser command: %s", error)
+            return
+        self.robot.send_control(command)
+
+    def send_control(self, message):
+        """Forward telemetry when the browser channel can accept it."""
         size = len(message.encode("utf-8")) if isinstance(message, str) else len(message)
-        if size > 16384 or channel.bufferedAmount + size > 65536:
+        if not self.is_active() or self.control_channel.bufferedAmount + size > 65536:
             return False
         try:
-            channel.send(message)
-            return True
-        except Exception:
-            logger.warning("Could not forward robot telemetry to client %s", self.client_id, exc_info=True)
+            self.control_channel.send(message)
+        except InvalidStateError:
             return False
+        return True
 
     def attach_robot_video(self):
-        if self._closing or self.robot is None:
+        if self._closing:
             return False
-        if self._video_track is not None:
-            return self._video_track.readyState == "live"
         track = self.robot.get_video_track()
         if track is None:
             return False
-        try:
-            self.pc.addTrack(track)
-        except Exception:
-            track.stop()
-            raise
         self._video_track = track
+        self.pc.addTrack(track)  # The negotiating caller closes this session on failure.
         return True
 
     def start_task(self, name: str, coroutine: Coroutine) -> asyncio.Task:
-        existing = self.tasks.get(name)
-        if self._closing or (existing is not None and not existing.done()):
-            coroutine.close()
-            raise RuntimeError(f"Cannot start client task {name!r}")
         task = asyncio.create_task(coroutine)
         self.tasks[name] = task
         task.add_done_callback(lambda done: self._task_done(name, done))
@@ -126,8 +116,7 @@ class ClientSession:
         self.tasks.clear()
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _start_close(self):
         if self._close_task is None:
