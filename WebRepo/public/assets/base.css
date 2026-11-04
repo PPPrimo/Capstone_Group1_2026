@@ -9,12 +9,17 @@ header { height: 0; flex: 0 0 0; overflow: hidden; }
 .toolbar > label { display: inline-flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
 .toolbar > label + label { border-left: 1px solid #666; padding-left: 1.5rem; }
 .toolbar select,
+.leader-button,
 .logout { box-sizing: border-box; min-height: 2.25rem; border: 1px solid #4a4a4a; border-radius: 6px; background: #303030; color: #f1f1f1; font: inherit; line-height: 1.25; transition: background-color 0.15s, border-color 0.15s; }
+.leader-button { padding: 0.4rem 0.9rem; cursor: pointer; }
 .toolbar select { color-scheme: dark; padding: 0.4rem 0.65rem; cursor: pointer; }
 .toolbar select:enabled:hover,
+.leader-button:enabled:hover,
 .logout:hover { background: #3a3a3a; border-color: #777; }
 .toolbar select:focus-visible,
+.leader-button:focus-visible,
 .logout:focus-visible { outline: 2px solid #5a9cdd; outline-offset: 2px; }
+.leader-button:disabled { opacity: 0.6; cursor: wait; }
 .toolbar select:disabled { background: #292929; color: #888; border-color: #3b3b3b; cursor: not-allowed; }
 .feature-page { box-sizing: border-box; padding-bottom: 3rem; }
 .feature-page > .panel { flex: 1; min-height: 0; }

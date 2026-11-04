@@ -1,4 +1,5 @@
 import { initLiveWebRTC } from '/api/webrtc/live_webrtc.js?v=20261102-2';
+import { initSerialLeader } from './leader_serial.js?v=20261104-1';
 
 const CONFIG = {
     robotName: '',
@@ -20,6 +21,12 @@ function init() {
     const status = document.getElementById('robotStatus');
     const mode = document.getElementById('tbt');
     const master = document.getElementById('masterMode');
+    const leader = initSerialLeader(() => {
+        if (CONFIG.robotName && mode.value === 'None') {
+            mode.value = 'Direct_Control';
+            window.liveWebRTC.refresh();
+        }
+    });
     let robots = [];
     let socket = null;
     let reconnectTimer = null;
@@ -40,12 +47,14 @@ function init() {
         const previousRole = CONFIG.robotRole;
         CONFIG.robotName = connected ? name.value : '';
         CONFIG.robotRole = connected ? role.value : '';
+        const changed = CONFIG.robotName !== previousName || CONFIG.robotRole !== previousRole;
         mode.disabled = master.disabled = !connected;
         if (!connected) master.checked = false;
+        if (changed && connected && leader.connected() && mode.value === 'None') mode.value = 'Direct_Control';
         status.textContent = robot ? {
             connected: 'Connected', lost: 'Lost — waiting for recovery...', confirmed_lost: 'Confirmed lost'
         }[robot.status] : (robots.length ? 'Select a robot and role.' : 'Waiting for a robot to connect...');
-        if (CONFIG.robotName !== previousName || CONFIG.robotRole !== previousRole) window.liveWebRTC.refresh();
+        if (changed) window.liveWebRTC.refresh();
     }
 
     function updateRoles() {
