@@ -118,7 +118,8 @@ async def send_loop(send_control, teleop_device):
             logger.info("status: sent %d telemetry, received %d controls, latency avg %.1f ms",
                         sent_count, received, latency_avg_ms)
             sent_count = 0
-            last_status = time.monotonic()        await asyncio.sleep(0.1)  # Send every 100 ms
+            last_status = time.monotonic()        
+            await asyncio.sleep(0.1)  # Send every 100 ms
 
 async def run_follower(teleop_device, robot_name, robot_role, api_key):
     # The track only reads latest_frame(); we own the cameras and close them after RTC.
