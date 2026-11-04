@@ -205,66 +205,6 @@ def load_api_key():
     return api_key
 
 
-async def run_leader(teleop_device, robot_name, robot_role, api_key):
-    # Act as the direct client; name/role identify the follower to control.
-    base = SERVER_URL.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
-    path = f"/api/webrtc/client/offer/{quote(robot_name, safe='')}/{quote(robot_role, safe='')}"
-    delay = 0.5
-    while True:
-        pc = None
-        try:
-            async with aiohttp.ClientSession(headers={"X-API-Key": api_key}, timeout=aiohttp.ClientTimeout(total=40)) as http:
-                async with http.get(f"{base}/api/webrtc/ice-servers") as response:
-                    if response.status in (401, 403):
-                        raise PermissionError("API key was rejected")
-                    response.raise_for_status()
-                    settings = await response.json()
-                pc = RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(**item) for item in settings["iceServers"]]))
-                channel = pc.createDataChannel("teleop", ordered=False, maxRetransmits=0)
-                ready = asyncio.Event()
-                channel.on("open", ready.set)
-                await pc.setLocalDescription(await pc.createOffer())
-                async with http.ws_connect(f"{base}{path}", params={"api_key": api_key}) as ws:
-                    await ws.send_json({
-                        "type": "offer", "sdp": pc.localDescription.sdp,
-                        "request_id": uuid.uuid4().hex, "direct_control": True,
-                    })
-                    answer = await ws.receive_json(timeout=40)
-                    if answer["type"] == "error":
-                        if not answer["retryable"]:
-                            raise ValueError(answer["error"])
-                        raise ConnectionError(answer["error"])
-                    await pc.setRemoteDescription(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
-                async with asyncio.timeout(30):
-                    await ready.wait()
-                delay = 0.5
-                logger.info("Direct RTC connected to %s/%s", robot_name, robot_role)
-
-                def send_direct(message):
-                    if channel.readyState != "open":
-                        raise ConnectionError("Direct control channel closed")
-                    channel.send(json.dumps(message))
-                    return True
-
-                await send_loop(send_direct, teleop_device)
-        except (aiohttp.ClientError, ConnectionError, TimeoutError) as error:
-            logger.warning("Direct RTC disconnected: %s; retrying", error)
-        finally:
-            if pc is not None:
-                await pc.close()
-        await asyncio.sleep(delay)
-        delay = min(delay * 2, 4)
-
-def load_api_key():
-    key_file = WORKSPACE_DIR / "APIKey.txt"
-    api_key = key_file.read_text(encoding="utf-8").strip() if key_file.exists() else ""
-    if not api_key:
-        while not api_key:
-            api_key = getpass("Enter the API key: ").strip()
-        key_file.write_text(api_key + "\n", encoding="utf-8")
-    return api_key
-
-
 def main():
     ### Input
     parser = argparse.ArgumentParser(description="Connect a robot arm using automatic serial-port detection.")
