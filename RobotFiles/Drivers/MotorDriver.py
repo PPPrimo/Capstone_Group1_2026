@@ -24,8 +24,35 @@ class MotorDriver:
 
     @staticmethod
     def find_port(motors):
-        #TBD
-        return None
+        """Find the unique port whose bus handshake matches the expected motors.
+
+        Probing does not change motor settings or disable torque. Identical arms
+        cannot be distinguished by their motor IDs/models; specify a port when
+        more than one attached bus matches.
+        """
+        if not motors:
+            raise ValueError("At least one motor must be defined for port discovery")
+
+        matches = []
+        failures = []
+        for port in sorted(list_ports.comports(), key=lambda item: item.device):
+            bus = FeetechMotorsBus(port=port.device, motors=motors)
+            try:
+                bus.connect()
+            except (OSError, RuntimeError) as exc:
+                failures.append(f"{port.device}: {exc}")
+            else:
+                matches.append(port.device)
+            finally:
+                # A failed handshake can leave the serial port open too.
+                if bus.is_connected:
+                    bus.disconnect(disable_torque=False)
+
+        if not matches:
+            details = "; ".join(failures) or "No serial ports were detected."
+            raise ConnectionError(f"No serial port matched the configured motors. {details}")
+
+        return matches
 
     @property
     def is_connected(self):
