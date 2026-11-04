@@ -52,7 +52,9 @@ export class SerialLeader {
         if (this.closing) throw new LeaderSerialError('Leader disconnected.');
         const packet = [255, 255, id, parameters.length + 2, instruction, ...parameters];
         packet.push(~packet.slice(2).reduce((sum, byte) => sum + byte, 0) & 255);
-        await this.writer.write(Uint8Array.from(packet));
+        this.writing = this.writer.write(Uint8Array.from(packet));
+        await this.writing;
+        if (this.closing) throw new LeaderSerialError('Leader disconnected.');
         let timer;
         this.reading = this.readPacket(id, size);
         try {
@@ -98,6 +100,7 @@ export class SerialLeader {
                 await this.reading?.catch(() => {}); // A cancelled or timed-out read is already handled by its caller.
                 this.reader.releaseLock();
             }
+            await this.writing?.catch(() => {});
             this.writer?.releaseLock();
             if (this.port.readable || this.port.writable) await this.port.close();
         })();
