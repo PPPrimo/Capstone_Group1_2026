@@ -52,7 +52,7 @@ class MotorDriver:
             details = "; ".join(failures) or "No serial ports were detected."
             raise ConnectionError(f"No serial port matched the configured motors. {details}")
 
-        return matches
+        return matches[0]
 
     @property
     def is_connected(self):

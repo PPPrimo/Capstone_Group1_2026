@@ -1,6 +1,8 @@
 
 
 from RobotFiles.Drivers.FollowerArm import FollowerRobotConfig, Follower
+from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
+
 from RobotFiles.WebRTC import RobotRTC
 
 from pathlib import Path
@@ -77,9 +79,10 @@ async def send_loop(rtc, teleop_device):
         with latency_log_lock:
             latency_avg_ms = sum(latency_log) / len(latency_log)
         message = {
-            "timestamp": time.time(), 
-            "latency_avg_ms": latency_avg_ms, 
-            }
+            "timestamp": time.time(),
+            "latency_avg_ms": latency_avg_ms,
+            "ctrl": teleop_device.get_position(),
+        }
         send_result = rtc.send_control(message)
         logger.info("telemetry: %s", json.dumps({**message, "sent": send_result}))
         await asyncio.sleep(0.1)  # Send every 100 ms
@@ -98,6 +101,21 @@ async def run_follower(teleop_device, robot_name, robot_role, api_key):
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(receive_loop(rtc, teleop_device))
             tasks.create_task(send_loop(rtc, teleop_device))
+    finally:
+        await rtc.close()
+
+async def run_leader(teleop_device, robot_name, robot_role, api_key):
+    rtc = RobotRTC(
+        SERVER_URL=SERVER_URL,
+        ROBOT_NAME=robot_name,
+        ROBOT_ROLE=robot_role,
+        API_KEY=api_key)
+
+    await rtc.connect()
+    print("connected")
+    logger.info("RTC connected")
+    try:
+        await send_loop(rtc, teleop_device)
     finally:
         await rtc.close()
 
@@ -120,8 +138,8 @@ def main():
     args = parser.parse_args()
     teleop_device = None
     try:
+        api_key = load_api_key()
         if args.type == "Follower":
-            api_key = load_api_key()
             teleop_config = FollowerRobotConfig(
                 port="auto",
                 id="PrimoFollower",
@@ -132,7 +150,14 @@ def main():
             asyncio.run(run_follower(teleop_device, args.robot_name, args.robot_role, api_key))
 
         elif args.type == "Leader":
-            print("Leader RTC mode is not implemented yet.")
+            teleop_config = LeaderTeleopConfig(
+                port="auto",
+                id="PrimoLeader",
+                calibration_dir=Path("RobotFiles/calibration/leader")
+            )
+            teleop_device = Leader(teleop_config)
+            teleop_device.connect()
+            asyncio.run(run_leader(teleop_device, args.robot_name, args.robot_role, api_key))
         
     except KeyboardInterrupt:
         print("\nStopping...")
