@@ -2,6 +2,7 @@
 
 from RobotFiles.Drivers.FollowerArm import FollowerRobotConfig, Follower
 from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
+from RobotFiles.WebRTC import RobotRTC, CameraSource, SideBySide 
 
 from RobotFiles.WebRTC import RobotRTC
 
@@ -18,7 +19,13 @@ from urllib.parse import quote
 import asyncio
 import logging
 import aiohttp
-from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
+
+# Cameras streamed to the browser
+CAMERAS = [
+    {"source": 0, "backend": "opencv"},   # USB webcam (/dev/video0)
+    {"backend": "picamera2"},             # Pi ribbon camera
+]
 
 SERVER_URL = os.getenv("PUBLISH_URL", "https://primowang.com/").rstrip("/")
 
@@ -56,6 +63,10 @@ logger = logging.getLogger(__name__)
 
 latency_log = [0.0] * 10
 latency_log_lock = threading.Lock()
+received_count = 0
+STATUS_PERIOD = 5.0
+stop_event = threading.Event()
+ExcutionPeriod = 0.01
 """Global Variables End"""
 
 def sync_states_to_follower(device, states: dict):
@@ -66,6 +77,7 @@ def sync_states_to_follower(device, states: dict):
     device.send_action(action)
 
 async def receive_loop(rtc, teleop_device):
+    global received_count
     while True:
         control = await rtc.receive_control()
         control = json.loads(control)
@@ -73,12 +85,16 @@ async def receive_loop(rtc, teleop_device):
         with latency_log_lock:
             latency_log.pop(0)
             latency_log.append(latency_ms)
+            received_count += 1
         if "leadState" in control:
             sync_states_to_follower(teleop_device, control["leadState"])
         logger.info("Received control: %r", control)
 
 
 async def send_loop(send_control, teleop_device):
+    global received_count
+    sent_count = 0
+    last_status = time.monotonic()
     while True:
         with latency_log_lock:
             latency_avg_ms = sum(latency_log) / len(latency_log)
@@ -93,25 +109,100 @@ async def send_loop(send_control, teleop_device):
             },
         }
         send_result = send_control(message)
-        logger.info("telemetry: %s", json.dumps({**message, "sent": send_result}))
-        await asyncio.sleep(0.1)  # Send every 100 ms
+        sent_count += bool(send_result)
+        logger.debug("telemetry: %s", json.dumps({**message, "sent": send_result}))
+
+        if time.monotonic() - last_status >= STATUS_PERIOD:
+            with latency_log_lock:
+                received, received_count = received_count, 0
+            logger.info("status: sent %d telemetry, received %d controls, latency avg %.1f ms",
+                        sent_count, received, latency_avg_ms)
+            sent_count = 0
+            last_status = time.monotonic()        await asyncio.sleep(0.1)  # Send every 100 ms
 
 async def run_follower(teleop_device, robot_name, robot_role, api_key):
+    # The track only reads latest_frame(); we own the cameras and close them after RTC.
+    cameras = [CameraSource(**camera).start() for camera in CAMERAS]
     rtc = RobotRTC(
+        video_source = cameras[0] if len(cameras) == 1 else SideBySide(*cameras),
         SERVER_URL = SERVER_URL, 
         ROBOT_NAME = robot_name,
         ROBOT_ROLE = robot_role,
         API_KEY = api_key)
 
-    await rtc.connect()
-    print("connected")
-    logger.info("RTC connected")
     try:
+        await rtc.connect()
+        print("connected")
+        logger.info("RTC connected")
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(receive_loop(rtc, teleop_device))
             tasks.create_task(send_loop(rtc.send_control, teleop_device))
     finally:
         await rtc.close()
+        for camera in cameras:
+            await camera.close()
+        for camera in cameras:
+            await camera.close()
+
+async def run_leader(teleop_device, robot_name, robot_role, api_key):
+    # Act as the direct client; name/role identify the follower to control.
+    base = SERVER_URL.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
+    path = f"/api/webrtc/client/offer/{quote(robot_name, safe='')}/{quote(robot_role, safe='')}"
+    delay = 0.5
+    while True:
+        pc = None
+        try:
+            async with aiohttp.ClientSession(headers={"X-API-Key": api_key}, timeout=aiohttp.ClientTimeout(total=40)) as http:
+                async with http.get(f"{base}/api/webrtc/ice-servers") as response:
+                    if response.status in (401, 403):
+                        raise PermissionError("API key was rejected")
+                    response.raise_for_status()
+                    settings = await response.json()
+                pc = RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(**item) for item in settings["iceServers"]]))
+                channel = pc.createDataChannel("teleop", ordered=False, maxRetransmits=0)
+                ready = asyncio.Event()
+                channel.on("open", ready.set)
+                await pc.setLocalDescription(await pc.createOffer())
+                async with http.ws_connect(f"{base}{path}", params={"api_key": api_key}) as ws:
+                    await ws.send_json({
+                        "type": "offer", "sdp": pc.localDescription.sdp,
+                        "request_id": uuid.uuid4().hex, "direct_control": True,
+                    })
+                    answer = await ws.receive_json(timeout=40)
+                    if answer["type"] == "error":
+                        if not answer["retryable"]:
+                            raise ValueError(answer["error"])
+                        raise ConnectionError(answer["error"])
+                    await pc.setRemoteDescription(RTCSessionDescription(sdp=answer["sdp"], type=answer["type"]))
+                async with asyncio.timeout(30):
+                    await ready.wait()
+                delay = 0.5
+                logger.info("Direct RTC connected to %s/%s", robot_name, robot_role)
+
+                def send_direct(message):
+                    if channel.readyState != "open":
+                        raise ConnectionError("Direct control channel closed")
+                    channel.send(json.dumps(message))
+                    return True
+
+                await send_loop(send_direct, teleop_device)
+        except (aiohttp.ClientError, ConnectionError, TimeoutError) as error:
+            logger.warning("Direct RTC disconnected: %s; retrying", error)
+        finally:
+            if pc is not None:
+                await pc.close()
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 4)
+
+def load_api_key():
+    key_file = WORKSPACE_DIR / "APIKey.txt"
+    api_key = key_file.read_text(encoding="utf-8").strip() if key_file.exists() else ""
+    if not api_key:
+        while not api_key:
+            api_key = getpass("Enter the API key: ").strip()
+        key_file.write_text(api_key + "\n", encoding="utf-8")
+    return api_key
+
 
 async def run_leader(teleop_device, robot_name, robot_role, api_key):
     # Act as the direct client; name/role identify the follower to control.
