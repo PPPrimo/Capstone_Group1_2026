@@ -2,6 +2,8 @@
 
 from threading import RLock
 
+from serial.tools import list_ports
+
 from lerobot.motors.feetech import FeetechMotorsBus
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.utils.decorators import check_if_not_connected
@@ -13,10 +15,17 @@ class MotorDriver:
         """Create a bus using the motor definitions supplied by the arm."""
         if not motors:
             raise ValueError("At least one motor must be defined for the bus")
+        if port == "auto":
+            port = self.find_port(motors)
         self.bus = FeetechMotorsBus(port=port, motors=motors, calibration=calibration)
         self.num_read_retries = num_read_retries
         self.max_relative_target = max_relative_target
         self._lock = RLock()
+
+    @staticmethod
+    def find_port(motors):
+        #TBD
+        return None
 
     @property
     def is_connected(self):

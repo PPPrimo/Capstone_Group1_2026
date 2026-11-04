@@ -10,6 +10,8 @@
 /3DPrintFiles/old files
 /lerobot - legacy
 /local_logs
+/APIKey.txt
+/RobotFiles/api_keys/
 /tests
 /WebRepo/Resources
 /WebRepo/server/sensitive
