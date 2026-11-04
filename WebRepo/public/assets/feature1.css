@@ -14,8 +14,7 @@
   box-sizing: border-box;
 }
 
-/*top and bottom bars*/
-#feature1_top_bar,
+/*bottom bar*/
 #feature_1_bottom {
   width: 100%;
   flex-shrink: 0;
@@ -23,7 +22,7 @@
   /* roughly 5-10% of viewport height */
   min-height: 4vh;
 
-  padding: 0.75rem 1.5rem;
+  padding: 0.75rem 18rem 0.75rem 1.5rem;
 
   box-sizing: border-box;
 
@@ -71,6 +70,10 @@
 #latency { white-space: nowrap; font-variant-numeric: tabular-nums; }
 #liveData { min-width: 0; overflow-wrap: anywhere; }
 #robotStatus { margin: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 700px) {
+  #feature_1_bottom { padding-right: 1.5rem; padding-bottom: 3rem; }
+}
 
 /*middle layout*/
 #feature1_middle {

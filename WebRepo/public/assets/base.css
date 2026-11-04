@@ -1,13 +1,23 @@
 html, body { height: 100%; }
 body { margin: 0; font-family: system-ui, sans-serif; min-height: 100%; overflow: hidden; display: flex; flex-direction: column; }
-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #eee; }
-.tabs { display: flex; gap: 8px; }
-.tab { padding: 6px 10px; border-radius: 6px; cursor: pointer; border: 1px solid #ddd; background: #fafafa; }
-.tab.active { background: #e6f2ff; border-color: #9ec5fe; }
-.logout { padding: 6px 10px; border-radius: 6px; border: 1px solid #ddd; background: #fff; color: #333; text-decoration: none; }
-.logout:hover { background: #f6f8fa; }
-.content { flex: 1 1 auto; min-height: 0; padding: 12px; display: flex; justify-content: center; align-items: stretch; }
+header { height: 0; flex: 0 0 0; overflow: hidden; }
+.logout { position: fixed; top: max(0.75rem, calc((4vh - 2.25rem) / 2)); right: 1.5rem; z-index: 10; display: inline-flex; align-items: center; justify-content: center; padding: 0.4rem 0.9rem; text-decoration: none; }
+.brand { position: fixed; bottom: 0.75rem; right: 1.5rem; z-index: 10; padding: 0.25rem 0.5rem; background: #222; color: white; white-space: nowrap; }
+.content { flex: 1 1 auto; min-height: 0; display: flex; justify-content: center; align-items: stretch; }
 #panelFrame { width: 100%; height: 100%; border: 0; display: block; }
+.toolbar { display: flex; flex-shrink: 0; align-items: center; flex-wrap: wrap; gap: 0.75rem 1.5rem; padding: 0.75rem 8rem 0.75rem 1.5rem; min-height: 4vh; box-sizing: border-box; background: #222; color: white; }
+.toolbar > label { display: inline-flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
+.toolbar > label + label { border-left: 1px solid #666; padding-left: 1.5rem; }
+.toolbar select,
+.logout { box-sizing: border-box; min-height: 2.25rem; border: 1px solid #4a4a4a; border-radius: 6px; background: #303030; color: #f1f1f1; font: inherit; line-height: 1.25; transition: background-color 0.15s, border-color 0.15s; }
+.toolbar select { color-scheme: dark; padding: 0.4rem 0.65rem; cursor: pointer; }
+.toolbar select:enabled:hover,
+.logout:hover { background: #3a3a3a; border-color: #777; }
+.toolbar select:focus-visible,
+.logout:focus-visible { outline: 2px solid #5a9cdd; outline-offset: 2px; }
+.toolbar select:disabled { background: #292929; color: #888; border-color: #3b3b3b; cursor: not-allowed; }
+.feature-page { box-sizing: border-box; padding-bottom: 3rem; }
+.feature-page > .panel { flex: 1; min-height: 0; }
 .panel { min-height: 100vh; }
 .note { color: #666; font-size: 13px; }
 .admin-only { color: #b00020; font-size: 13px; }

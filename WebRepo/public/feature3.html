@@ -3,11 +3,20 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>System Status</title>
-  <link rel="stylesheet" href="./assets/base.css?v=20251214" />
+  <title>Server Status</title>
+  <link rel="stylesheet" href="./assets/base.css?v=20261103-2" />
   <link rel="stylesheet" href="./assets/feature3.css?v=20260216" />
 </head>
-<body class="fit-viewport">
+<body class="fit-viewport feature-page">
+  <div class="toolbar">
+    <label for="featureSelect">View
+      <select id="featureSelect">
+        <option value="feature1">Remote Control</option>
+        <option value="feature2">Placeholder</option>
+        <option value="feature3" selected hidden>Server Status</option>
+      </select>
+    </label>
+  </div>
   <section id="feature3" class="panel fit-section">
     <!-- Row 1: CPU & GPU Usage -->
     <div class="stats-row">
@@ -51,7 +60,7 @@
 
     <!-- Row 4: Title + Disks -->
     <div class="stats-row-title-disk">
-      <h2 class="stats-title">System Status <span id="statusDot" class="dot dot-waiting"></span></h2>
+      <h2 class="stats-title">Server Status <span id="statusDot" class="dot dot-waiting"></span></h2>
       <div id="diskGrid" class="stats-row stats-row-wrap"></div>
     </div>
 

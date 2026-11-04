@@ -1,36 +1,23 @@
-// Simple tab switching + admin gate for Feature 3
-const tabs = document.querySelectorAll('.tab');
 const frame = document.getElementById('panelFrame');
-
-const tabMap = {
+const pages = {
   feature1: './feature1.html',
   feature2: './feature2.html',
   feature3: './feature3.html',
 };
 
-let currentTab = null;
+const account = fetch('/api/me', { credentials: 'same-origin' })
+  .then(response => response.ok ? response.json() : null)
+  .catch(error => { console.error('Could not load account:', error); return null; });
 
-tabs.forEach(t => {
-  t.addEventListener('click', () => {
-    const tab = t.dataset.tab;
-    if (tab === currentTab) return;          // already showing — skip reload
-    currentTab = tab;
-    tabs.forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    frame.setAttribute('src', tabMap[tab]);
+frame.addEventListener('load', async () => {
+  const menu = frame.contentDocument.getElementById('featureSelect');
+  if (!menu) return; // The initial blank frame or a login redirect has no feature menu.
+  menu.addEventListener('change', () => {
+    frame.title = menu.selectedOptions[0].textContent;
+    frame.src = pages[menu.value];
   });
+  const user = await account;
+  menu.querySelector('[value="feature3"]').hidden = !user?.is_superuser;
 });
 
-// Hide admin-only tabs until we confirm the user is a superuser
-(async () => {
-  try {
-    const res = await fetch('/api/me', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const me = await res.json();
-    if (!me.is_superuser) {
-      tabs.forEach(t => {
-        if (t.dataset.tab === 'feature3') t.style.display = 'none';
-      });
-    }
-  } catch (_) { /* leave tabs visible on network error */ }
-})();
+frame.src = pages.feature1;

@@ -3,13 +3,20 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Feature 1</title>
-  <link rel="stylesheet" href="./assets/base.css?v=20251214" />
-  <link rel="stylesheet" href="./assets/feature1.css?v=20261102-3" />
+  <title>Remote Control</title>
+  <link rel="stylesheet" href="./assets/base.css?v=20261103-2" />
+  <link rel="stylesheet" href="./assets/feature1.css?v=20261103-1" />
 </head>
 <body>
   <section id="feature1" class="panel">
-    <div id="feature1_top_bar">
+    <div id="feature1_top_bar" class="toolbar">
+      <label for="featureSelect">View
+        <select id="featureSelect">
+          <option value="feature1" selected>Remote Control</option>
+          <option value="feature2">Placeholder</option>
+          <option value="feature3" hidden>Server Status</option>
+        </select>
+      </label>
       <label class="robot-selector" for="robotName">Robot name
         <select id="robotName" disabled><option value="">Select robot</option></select>
       </label>
