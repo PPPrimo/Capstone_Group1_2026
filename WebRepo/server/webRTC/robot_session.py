@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from aiortc import RTCPeerConnection, RTCDataChannel
 from aiortc.contrib.media import MediaRelay
 from aiortc.exceptions import InvalidStateError
+from aiortc.mediastreams import MediaStreamError
 from .ice_config import peer_configuration
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,10 @@ class RobotSession:
                 return
             old_track = self.video_track
             self.video_track = track
+            drain = self.tasks.get("video_drain")
+            if drain is not None:
+                drain.cancel()
+            self.start_task("video_drain", self._drain_video(track))
             self.video_ready.set()
             self._video_changed.set()
             if old_track is not None and old_track is not track:
@@ -245,6 +250,17 @@ class RobotSession:
         return self.send_auxiliary({"ident": "S_ovr"})
 
 # video functions
+    async def _drain_video(self, track):
+        # Keep the relay reading even without viewers; discard historical frames.
+        proxy = self.relay.subscribe(track, buffered=False)
+        try:
+            while True:
+                await proxy.recv()
+        except MediaStreamError:
+            pass
+        finally:
+            proxy.stop()
+
     async def wait_for_video(self, timeout: float = 10): #reviewed
         async with asyncio.timeout(timeout):
             while True:
@@ -258,7 +274,7 @@ class RobotSession:
     def get_video_track(self): #unused - client connection case does not exist anymore
         if self._closing or self.video_track is None or self.video_track.readyState != "live":
             return None
-        return self.relay.subscribe(self.video_track)
+        return self.relay.subscribe(self.video_track, buffered=False)
 
 # task helpers
     def start_task(self, name: str, coroutine: Coroutine) -> asyncio.Task: #reviewed
