@@ -17,11 +17,11 @@ from av import VideoFrame
 
 logger = logging.getLogger(__name__)
 CAMERA_SOURCE = 0
-CAMERA_BACKEND = "opencv"  # "picamera2" for the Raspberry Pi ribbon camera.
+CAMERA_BACKEND = "opencv"  # "picamera2" for the Raspberry Pi ribbon camera
 VIDEO_WIDTH = 640
 VIDEO_HEIGHT = 480
 VIDEO_FPS = 30
-STALE_AFTER = 1.0  # Seconds before an old frame is treated as missing.
+k_videoStale = 1.0  # Seconds before an old frame is treated as missing (frozen video)
 
 
 class CameraSource:
@@ -33,8 +33,8 @@ class CameraSource:
         self.width, self.height, self.fps = width, height, fps
         self.name = "ribbon camera" if backend == "picamera2" else f"USB camera {source}"
         self._camera = None
-        self._frame = None
-        self._frame_time = 0.0
+        self._m_scene = None
+        self._m_sceneTime = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -84,11 +84,11 @@ class CameraSource:
         return self
 
     def latest_frame(self):
-        """Return the newest frame, or None if there is no frame from the last STALE_AFTER seconds."""
+        """Return the newest frame, or None if there is no frame from the last k_videoStale seconds."""
         with self._lock:
-            if time.monotonic() - self._frame_time > STALE_AFTER:
+            if time.monotonic() - self._m_sceneTime > k_videoStale:
                 return None
-            return self._frame
+            return self._m_scene
 
     @property
     def ready(self):
@@ -103,7 +103,7 @@ class CameraSource:
                     if frame is None:
                         raise RuntimeError("read failed")
                     with self._lock:
-                        self._frame, self._frame_time = frame, time.monotonic()
+                        self._m_scene, self._m_sceneTime = frame, time.monotonic()
             except Exception as error:
                 logger.warning("%s: %s; retrying in 1 s", self.name, error)
             finally:
@@ -115,7 +115,7 @@ class CameraSource:
         if self._thread is not None:
             await asyncio.to_thread(self._thread.join, 2)
         with self._lock:
-            self._frame, self._frame_time = None, 0.0
+            self._m_scene, self._m_sceneTime = None, 0.0
 
 
 class SideBySide:

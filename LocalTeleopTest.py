@@ -9,9 +9,9 @@ from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
 from RobotFiles.Drivers.FollowerArm import FollowerRobotConfig, Follower
 
 
-EXECUTION_PERIOD = 0.01
-payload = None
-payload_lock = threading.Lock()
+k_readFreq = 100  # (Hz) rate the leader joints are read and the follower updated (RL-4.1)
+leader_state = None  # Latest leader sample: m_leaderPos plus velocity and m_motorCurrent
+leader_state_lock = threading.Lock()
 stop_event = threading.Event()
 
 
@@ -34,22 +34,23 @@ def get_all_states(device):
 
 
 def run_leader_local(device):
-    global payload
+    global leader_state
     while not stop_event.is_set():
-        states = get_all_states(device)
-        with payload_lock:
-            payload = states
-        time.sleep(EXECUTION_PERIOD)
+        state = get_all_states(device)
+        with leader_state_lock:
+            leader_state = state
+        time.sleep(1 / k_readFreq)
 
 
 def run_follower_local(device):
     while not stop_event.is_set():
-        with payload_lock:
-            states = payload
-        print(states)
-        if states is not None:
-            device.send_action({f"{motor}.pos": data["position"] for motor, data in states["motors"].items()})
-        time.sleep(EXECUTION_PERIOD)
+        with leader_state_lock:
+            state = leader_state
+        print(state)
+        if state is not None:
+            c_followerPos = {f"{motor}.pos": data["position"] for motor, data in state["motors"].items()}
+            device.send_action(c_followerPos)
+        time.sleep(1 / k_readFreq)
 
 
 def main():

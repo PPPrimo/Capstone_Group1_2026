@@ -19,6 +19,9 @@ SIGNAL_TIMEOUT = 40
 CONNECT_TIMEOUT = 30
 MAX_COMMAND_BYTES = 16384
 MAX_BUFFERED_BYTES = 65536
+# k_cmdTimeout (seconds): a command older than this is never delivered (SSR-2.1)
+# Requirements nominal is 250 ms, tuned on real networks (LC-5)
+k_cmdTimeout = 0.5
 
 
 class AuthenticationError(RuntimeError):
@@ -33,10 +36,9 @@ class RobotRTC:
         self._direct = None
         self._finished_negotiations = {}
         self._direct_task = None
-        self.server_override = False
-        self.server_command = None
-        self.user_command = None
-        self.command_timeout = 0.5
+        self.m_override = False
+        self.supervisor_command = None
+        self.operator_command = None
         self._last_command = None
         self.video_track = None
         self.video_source = video_source
@@ -117,14 +119,14 @@ class RobotRTC:
         return sent
 
     async def _next_control(self, timeout=None): #reviewed
-        #chooses which command to follow (server overide or user)
+        #chooses which command to follow: supervisor while m_override is set, else operator (SSR-4)
         async with asyncio.timeout(timeout):
             while True:
                 self._received.clear()
                 if self._closing or (self._runner is not None and self._runner.done()):
                     raise self.last_error or ConnectionError("RTC is closed")
-                selected = self.server_command if self.server_override else self.user_command
-                if selected is not None and selected is not self._last_command and time.monotonic() - selected[0] <= self.command_timeout:
+                selected = self.supervisor_command if self.m_override else self.operator_command
+                if selected is not None and selected is not self._last_command and time.monotonic() - selected[0] <= k_cmdTimeout:
                     self._last_command = selected
                     return selected[1]
                 await self._received.wait()
@@ -152,14 +154,14 @@ class RobotRTC:
         if self._manual_receiver is not None:
             raise RuntimeError("A receive_control() call is already waiting")
         loop = asyncio.get_running_loop()
-        self.server_command = self.user_command = self._last_command = None
+        self.supervisor_command = self.operator_command = self._last_command = None
         self._receiving = True
         self._receive_task = loop.create_task(self._dispatch_control(callback), name="robot-rtc-receiver")
 
     async def stop_receiving(self):
         #stops the recieving callback
         self._receiving = False
-        self.server_command = self.user_command = self._last_command = None
+        self.supervisor_command = self.operator_command = self._last_command = None
         task = self._receive_task
         if task is not None and task is not asyncio.current_task():
             task.cancel()
@@ -192,7 +194,7 @@ class RobotRTC:
             if self._is_current(pc):
                 if pc.connectionState != "connected":
                     self.connected = False
-                    self.server_command = self.user_command = self._last_command = None
+                    self.supervisor_command = self.operator_command = self._last_command = None
                 self._transport_changed.set()
 
         @pc.on("datachannel")
@@ -215,7 +217,7 @@ class RobotRTC:
             def on_close():
                 if self._is_current(pc):
                     self.connected = False
-                    self.server_command = self.user_command = self._last_command = None
+                    self.supervisor_command = self.operator_command = self._last_command = None
                     self._transport_changed.set()
 
             @channel.on("message")
@@ -347,8 +349,8 @@ class RobotRTC:
             await self._stop_direct()
             self.auxiliary_channel = None
             self._finished_negotiations.clear()
-            self.server_override = False
-            self.server_command = self.user_command = self._last_command = None
+            self.m_override = False
+            self.supervisor_command = self.operator_command = self._last_command = None
             self.pc = None
             self.control_channel = None
             self.video_track = None
@@ -360,10 +362,10 @@ class RobotRTC:
         if not isinstance(message, (str, bytes)):
             message = json.dumps(message, separators=(",", ":"), allow_nan=False)
         value = (time.monotonic(), message)
-        if source == "server":
-            self.server_command = value
+        if source == "server":  # JSON key "server" = supervisor command relayed by the server
+            self.supervisor_command = value
         else:
-            self.user_command = value
+            self.operator_command = value
         self._received.set()
 
     def _send_auxiliary(self, message): #reviewed
@@ -398,16 +400,16 @@ class RobotRTC:
     def _receive_auxiliary(self, payload):
         message = json.loads(payload)
         identifier = message["ident"]
-        override = message["server_override"]
-        if override != self.server_override:
-            self.server_override = override
-            self.server_command = self.user_command = self._last_command = None
+        override = message["server_override"]  # JSON key from the server; stored as m_override
+        if override != self.m_override:
+            self.m_override = override
+            self.supervisor_command = self.operator_command = self._last_command = None
             self._received.set()
         if identifier == "S_ovr":
             return
         key = (message["sessID"], message["ngoID"])
         if key in self._finished_negotiations:
-            return  # Retransmission after completion, before the server saw confirmation.
+            return  # Retransmission after completion, before the server saw confirmation
         state = self._direct
         if identifier == "R_Off":
             if state is not None and (state["session_id"], state["id"]) == key:
@@ -425,12 +427,12 @@ class RobotRTC:
                      "answer_ack": False, "status_ack": None, "cancelled": False, "established": False,
                      "pc": None, "channel": None, "track": None}
             self._direct = state
-            self.user_command = None
+            self.operator_command = None
             self._send_auxiliary(self._direct_message(state, "R_Rdy", ready=True))
             self._direct_task = asyncio.create_task(self._run_direct(state), name=f"direct:{key[1]}")
             return
         if state is None or (state["session_id"], state["id"]) != key:
-            return  # Acknowledgement for a replaced negotiation.
+            return  # Acknowledgement for a replaced negotiation
         if identifier == "R_Ack":
             state["answer_ack"] = True
         elif identifier == "R_Cnf":
@@ -447,7 +449,7 @@ class RobotRTC:
         @pc.on("connectionstatechange")
         def on_state(): #new
             if self._direct is state and pc.connectionState != "connected":
-                self.user_command = None
+                self.operator_command = None
             state["changed"].set()
 
         @pc.on("datachannel")
@@ -522,7 +524,7 @@ class RobotRTC:
             if state["track"] is not None:
                 state["track"].stop()
             if self._direct is state:
-                self.user_command = None
+                self.operator_command = None
             # Announce release until acknowledged; reliable SCTP also preserves ordering.
             if not self._closing and self.connected and not state["cancelled"]:
                 for _ in range(6):
@@ -574,7 +576,7 @@ class RobotRTC:
             await asyncio.gather(task, return_exceptions=True)
         self._direct = None
         self._direct_task = None
-        self.user_command = None
+        self.operator_command = None
 
     async def _run(self): #reviewed
         #continously retry connection untill fatal error (timeout error not included)
@@ -621,7 +623,7 @@ class RobotRTC:
         if self._receive_task is not caller:
             await self.stop_receiving()
         await self._stop_direct()
-        self.server_command = self.user_command = self._last_command = None
+        self.supervisor_command = self.operator_command = self._last_command = None
         if self._runner is not None: #run task does not involve close
             self._runner.cancel()
             await asyncio.gather(self._runner, return_exceptions=True)

@@ -61,30 +61,31 @@ logging.getLogger("aioice.ice").addFilter(IceLogFilter())
 logger = logging.getLogger(__name__)
 ## Logger end
 
-latency_log = [0.0] * 10
-latency_log_lock = threading.Lock()
+ctrlLatency_log = [0.0] * 10  # (ms) Recent leader-to-follower latencies
+ctrlLatency_log_lock = threading.Lock()
 received_count = 0
 STATUS_PERIOD = 5.0
 stop_event = threading.Event()
-ExcutionPeriod = 0.01
+k_readFreq = 10  # (Hz) rate the arm joints are read and sent (RL-4.1)
 """Global Variables End"""
 
-def sync_states_to_follower(device, states: dict):
-    # Convert motor states received over WebRTC into follower position targets.
-    if states is None or "motors" not in states:
+def sync_states_to_follower(device, leader_state: dict):
+    # Convert leader joint angles received over WebRTC into follower position targets (RF-3.2)
+    if leader_state is None or "motors" not in leader_state:
         return
-    action = {f"{motor}.pos": data["position"] for motor, data in states["motors"].items()}
-    device.send_action(action)
+    m_leaderPos = {motor: data["position"] for motor, data in leader_state["motors"].items()}
+    c_followerPos = {f"{motor}.pos": angle for motor, angle in m_leaderPos.items()}
+    device.send_action(c_followerPos)
 
 async def receive_loop(rtc, teleop_device):
     global received_count
     while True:
         control = await rtc.receive_control()
         control = json.loads(control)
-        latency_ms = (time.time() - control["timestamp"]) * 1000
-        with latency_log_lock:
-            latency_log.pop(0)
-            latency_log.append(latency_ms)
+        ctrlLatency_ms = (time.time() - control["timestamp"]) * 1000
+        with ctrlLatency_log_lock:
+            ctrlLatency_log.pop(0)
+            ctrlLatency_log.append(ctrlLatency_ms)
             received_count += 1
         if "leadState" in control:
             sync_states_to_follower(teleop_device, control["leadState"])
@@ -96,11 +97,11 @@ async def send_loop(send_control, teleop_device):
     sent_count = 0
     last_status = time.monotonic()
     while True:
-        with latency_log_lock:
-            latency_avg_ms = sum(latency_log) / len(latency_log)
+        with ctrlLatency_log_lock:
+            ctrlLatency_avg_ms = sum(ctrlLatency_log) / len(ctrlLatency_log)
         message = {
             "timestamp": time.time(),
-            "latency_avg_ms": latency_avg_ms,
+            "latency_avg_ms": ctrlLatency_avg_ms,
             "leadState": {
                 "motors": {
                     motor: {"position": position}
@@ -113,13 +114,13 @@ async def send_loop(send_control, teleop_device):
         logger.debug("telemetry: %s", json.dumps({**message, "sent": send_result}))
 
         if time.monotonic() - last_status >= STATUS_PERIOD:
-            with latency_log_lock:
+            with ctrlLatency_log_lock:
                 received, received_count = received_count, 0
             logger.info("status: sent %d telemetry, received %d controls, latency avg %.1f ms",
-                        sent_count, received, latency_avg_ms)
+                        sent_count, received, ctrlLatency_avg_ms)
             sent_count = 0
             last_status = time.monotonic()        
-        await asyncio.sleep(0.1)  # Send every 100 ms ?????
+        await asyncio.sleep(1 / k_readFreq)
 
 async def run_follower(teleop_device, robot_name, robot_role, api_key):
     # The track only reads latest_frame(); we own the cameras and close them after RTC.
@@ -146,7 +147,7 @@ async def run_follower(teleop_device, robot_name, robot_role, api_key):
             await camera.close()
 
 async def run_leader(teleop_device, robot_name, robot_role, api_key):
-    # Act as the direct client; name/role identify the follower to control.
+    # Act as the direct client; name/role identify the follower to control
     base = SERVER_URL.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
     path = f"/api/webrtc/client/offer/{quote(robot_name, safe='')}/{quote(robot_role, safe='')}"
     delay = 0.5
