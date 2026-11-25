@@ -22,9 +22,13 @@ LeaderLock (below) mirrors a stop on the leader arm: every joint except the trip
 where it is, and the tripped joint can only move back, away from the obstacle. It only needs the
 guard's status dict, so it works locally or with a status received over the network.
 
-Thresholds (mA, 0.25 s average) come from the 2026-10-17 bench runs with 100 Hz local teleop.
-shoulder_pan is well tested; shoulder_lift, elbow_flex and gripper have one real trip each;
-the wrist joints are untested. Recheck them with the network's ~10 Hz input using the CSV log.
+Limits (mA, 0.25 s average) were set on 2026-10-17 and checked on 2026-11-25 with a hold test on
+the bench (local teleop, limits disabled, each follower joint held by hand 3-5 times while the leader
+kept pushing): all 26 holds crossed their limit, none was missed. Per-joint notes are next to
+k_currentLimit. "Normal" is the highest average seen in normal moves across the 2026-11-25 runs.
+shoulder_lift and elbow_flex trip slowly on gentle holds (up to ~1.8 s) because their current
+builds gradually; don't lower their limits to fix that (see the elbow note), add a stall condition.
+Not yet checked with the network's ~10 Hz input: recheck with --guard-log on the Pi.
 Current is converted at 6.5 mA per count, the commonly quoted STS3215 value (not confirmed).
 """
 
@@ -40,12 +44,15 @@ logger = logging.getLogger(__name__)
 k_maPerCount = 6.5
 
 k_currentLimit = {
-    "shoulder_pan": 200,   # blocked avg 381, normal max 93
-    "shoulder_lift": 600,  # one real trip at 604; normal reaches ~470 (carries arm weight)
-    "elbow_flex": 850,     # one real trip at 861; normal reaches ~680
-    "wrist_flex": 200,     # untested: normal max 83
-    "wrist_roll": 150,     # untested: normal max 8
-    "gripper": 400,        # high on purpose: holding an object reads ~150 steady
+    # 2026-11-25 hold test: holds / peak while held / time to trip; normal-use max
+    "shoulder_pan": 200,   # 5 holds, 1182-2210, trip 0.07-0.28 s; normal 80
+    "shoulder_lift": 600,  # 4 holds, 2081-2311, trip 0.37-1.77 s; normal 406 (carries arm weight)
+    "elbow_flex": 850,     # 5 holds, 1394-2264, trip 0.29-1.35 s; normal 399 (680 in fast moves, 10-17).
+                           # Keep above ~800: holding the wrist loads the elbow to ~800, and a lower
+                           # limit would blame the elbow, so the leader lock would free the wrong joint.
+    "wrist_flex": 200,     # 4 holds, 421-849, trip 0.32-0.75 s; normal 120
+    "wrist_roll": 150,     # 3 holds, 214-423, trip 0.04-0.20 s; normal 76
+    "gripper": 400,        # 3 holds, 891-911, trip 0.04-0.10 s; normal 85; gripping an object reads ~150
 }
 
 
