@@ -41,10 +41,15 @@ def run_leader_local(device, guard, lock):
         state = get_all_states(device)
         with leader_state_lock:
             leader_state = state
-        # Mirror a follower stop on the leader: lock every joint but the tripped one
+        # Mirror a follower stop on the leader: lock every joint but the tripped one.
+        # Pull the leader's angles and currents out of the reading we just took (no extra bus reads).
+        m_leaderPos = {}
+        m_motorCurrent = {}
+        for motor, data in state["motors"].items():
+            m_leaderPos[motor] = data["position"]
+            m_motorCurrent[motor] = data["current"]
         try:
-            lock.update(guard.status(), {motor: data["position"] for motor, data in state["motors"].items()},
-                        {motor: data["current"] for motor, data in state["motors"].items()})
+            lock.update(guard.status(), m_leaderPos, m_motorCurrent)
         except Exception as exc:  # a failed lock write must not stop teleop; the follower guard still holds
             logging.warning("Leader lock update failed: %s", exc)
         time.sleep(1 / k_readFreq)
@@ -56,7 +61,9 @@ def run_follower_local(guard):
         with leader_state_lock:
             state = leader_state
         if state is not None:
-            m_leaderPos = {motor: data["position"] for motor, data in state["motors"].items()}
+            m_leaderPos = {}
+            for motor, data in state["motors"].items():
+                m_leaderPos[motor] = data["position"]
             guard.set_target(m_leaderPos)
         time.sleep(1 / k_readFreq)
 
@@ -81,11 +88,16 @@ def main():
         calibration_dir=Path("RobotFiles/calibration/follower"),
     ))
     threads = []
-    guard = lock = None
+    guard = None
+    lock = None
     try:
         leader.connect()
         follower.connect()
-        guard = CollisionGuard(follower, log_dir="local_logs" if args.guard_log else None).start()
+        if args.guard_log:
+            guard_log_dir = "local_logs"
+        else:
+            guard_log_dir = None
+        guard = CollisionGuard(follower, log_dir=guard_log_dir).start()
         lock = LeaderLock(leader, torque_pct=args.lock_torque).start()
         threads = [
             threading.Thread(target=run_leader_local, args=(leader, guard, lock)),

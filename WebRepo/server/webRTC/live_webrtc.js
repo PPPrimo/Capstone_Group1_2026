@@ -113,14 +113,16 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         latency.textContent = Number.isFinite(obj.latency_avg_ms) && obj.latency_avg_ms >= 0
             ? `Latency: ${obj.latency_avg_ms.toFixed(2)} ms` : 'Latency: N/A';
         // Collision guard status from the robot (repeated in every telemetry message).
-        const guard = obj && obj.guard;
-        const stopped = guard && guard.state === 'stopped';
-        if (stopped) {
-            latency.textContent += `  |  STOPPED: collision on ${guard.joint}. Back the leader off ${guard.back_off_deg}° to resume.`;
-        } else if (guard && guard.state === 'fault') {
-            latency.textContent += '  |  ROBOT FAULT: collision guard stopped (motor bus error).';
+        latency.style.color = '';
+        if (obj.guard) {
+            if (obj.guard.state === 'stopped') {
+                latency.textContent += `  |  STOPPED: collision on ${obj.guard.joint}. Back the leader off ${obj.guard.back_off_deg}° to resume.`;
+                latency.style.color = 'red';
+            } else if (obj.guard.state === 'fault') {
+                latency.textContent += '  |  ROBOT FAULT: collision guard stopped (motor bus error).';
+                latency.style.color = 'red';
+            }
         }
-        latency.style.color = stopped || (guard && guard.state === 'fault') ? 'red' : '';
 
         if (obj && typeof obj.timestamp === 'number' && Number.isFinite(obj.timestamp)) {
             if (channel.readyState === 'open') {

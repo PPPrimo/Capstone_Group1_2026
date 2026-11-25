@@ -100,7 +100,11 @@ async def send_loop(send_control, teleop_device, guard=None):
         with ctrlLatency_log_lock:
             ctrlLatency_avg_ms = sum(ctrlLatency_log) / len(ctrlLatency_log)
         # With a guard, reuse its latest read instead of a second bus read
-        m_armPos = (guard and guard.positions()) or teleop_device.get_position()
+        m_armPos = None
+        if guard is not None:
+            m_armPos = guard.positions()
+        if m_armPos is None:
+            m_armPos = teleop_device.get_position()
         message = {
             "timestamp": time.time(),
             "latency_avg_ms": ctrlLatency_avg_ms,
@@ -155,7 +159,11 @@ k_guardStatusTimeout = 1.0  # (s) without robot telemetry before the leader unlo
 async def lock_loop(teleop_device, lock, latest):
     # Mirror the robot's collision stop on this leader, using the guard status from its telemetry
     while True:
-        status = latest["guard"] if time.monotonic() - latest["time"] <= k_guardStatusTimeout else {}
+        # Use the robot's last guard status, unless it is too old (then act as if not stopped).
+        if time.monotonic() - latest["time"] <= k_guardStatusTimeout:
+            status = latest["guard"]
+        else:
+            status = {}
         try:
             lock.update(status, teleop_device.get_position(), teleop_device.get_current())
         except Exception as error:  # a bus hiccup must not stop teleop
@@ -191,7 +199,8 @@ async def run_leader(teleop_device, lock, robot_name, robot_role, api_key):
                     except (ValueError, AttributeError):
                         return
                     if isinstance(guard_status, dict):
-                        latest["guard"], latest["time"] = guard_status, time.monotonic()
+                        latest["guard"] = guard_status
+                        latest["time"] = time.monotonic()
                 await pc.setLocalDescription(await pc.createOffer())
                 async with http.ws_connect(f"{base}{path}", params={"api_key": api_key}) as ws:
                     await ws.send_json({
@@ -250,7 +259,8 @@ def main():
     parser.add_argument("--lock-torque", type=float, default=50, help="Leader: holding strength while the robot is stopped, %% of max (default 50)")
     args = parser.parse_args()
     teleop_device = None
-    guard = lock = None
+    guard = None
+    lock = None
     try:
         api_key = load_api_key()
         if args.type == "Follower":
@@ -261,7 +271,11 @@ def main():
             )
             teleop_device = Follower(teleop_config)
             teleop_device.connect()
-            guard = CollisionGuard(teleop_device, log_dir=WORKSPACE_DIR / "local_logs" if args.guard_log else None).start()
+            if args.guard_log:
+                guard_log_dir = WORKSPACE_DIR / "local_logs"
+            else:
+                guard_log_dir = None
+            guard = CollisionGuard(teleop_device, log_dir=guard_log_dir).start()
             asyncio.run(run_follower(teleop_device, guard, args.robot_name, args.robot_role, api_key))
 
         elif args.type == "Leader":
