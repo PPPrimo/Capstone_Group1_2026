@@ -5,6 +5,7 @@ from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
 from RobotFiles.WebRTC import RobotRTC, CameraSource, SideBySide 
 
 from RobotFiles.WebRTC import RobotRTC
+from RobotFiles.CollisionGuard import CollisionGuard, LeaderLock
 
 from pathlib import Path
 import argparse
@@ -69,15 +70,14 @@ stop_event = threading.Event()
 k_readFreq = 10  # (Hz) rate the arm joints are read and sent (RL-4.1)
 """Global Variables End"""
 
-def sync_states_to_follower(device, leader_state: dict):
-    # Convert leader joint angles received over WebRTC into follower position targets (RF-3.2)
+def sync_states_to_follower(guard, leader_state: dict):
+    # Hand leader joint angles received over WebRTC to the collision guard, which moves the follower (RF-3.2)
     if leader_state is None or "motors" not in leader_state:
         return
     m_leaderPos = {motor: data["position"] for motor, data in leader_state["motors"].items()}
-    c_followerPos = {f"{motor}.pos": angle for motor, angle in m_leaderPos.items()}
-    device.send_action(c_followerPos)
+    guard.set_target(m_leaderPos)
 
-async def receive_loop(rtc, teleop_device):
+async def receive_loop(rtc, guard):
     global received_count
     while True:
         control = await rtc.receive_control()
@@ -88,27 +88,31 @@ async def receive_loop(rtc, teleop_device):
             ctrlLatency_log.append(ctrlLatency_ms)
             received_count += 1
         if "leadState" in control:
-            sync_states_to_follower(teleop_device, control["leadState"])
+            sync_states_to_follower(guard, control["leadState"])
         logger.info("Received control: %r", control)
 
 
-async def send_loop(send_control, teleop_device):
+async def send_loop(send_control, teleop_device, guard=None):
     global received_count
     sent_count = 0
     last_status = time.monotonic()
     while True:
         with ctrlLatency_log_lock:
             ctrlLatency_avg_ms = sum(ctrlLatency_log) / len(ctrlLatency_log)
+        # With a guard, reuse its latest read instead of a second bus read
+        m_armPos = (guard and guard.positions()) or teleop_device.get_position()
         message = {
             "timestamp": time.time(),
             "latency_avg_ms": ctrlLatency_avg_ms,
             "leadState": {
                 "motors": {
                     motor: {"position": position}
-                    for motor, position in teleop_device.get_position().items()
+                    for motor, position in m_armPos.items()
                 }
             },
         }
+        if guard is not None:
+            message["guard"] = guard.status()  # repeated every send, so a lost packet doesn't hide a stop
         send_result = send_control(message)
         sent_count += bool(send_result)
         logger.debug("telemetry: %s", json.dumps({**message, "sent": send_result}))
@@ -122,7 +126,7 @@ async def send_loop(send_control, teleop_device):
             last_status = time.monotonic()        
         await asyncio.sleep(1 / k_readFreq)
 
-async def run_follower(teleop_device, robot_name, robot_role, api_key):
+async def run_follower(teleop_device, guard, robot_name, robot_role, api_key):
     # The track only reads latest_frame(); we own the cameras and close them after RTC.
     cameras = [CameraSource(**camera).start() for camera in CAMERAS]
     rtc = RobotRTC(
@@ -137,8 +141,8 @@ async def run_follower(teleop_device, robot_name, robot_role, api_key):
         print("connected")
         logger.info("RTC connected")
         async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(receive_loop(rtc, teleop_device))
-            tasks.create_task(send_loop(rtc.send_control, teleop_device))
+            tasks.create_task(receive_loop(rtc, guard))
+            tasks.create_task(send_loop(rtc.send_control, teleop_device, guard))
     finally:
         await rtc.close()
         for camera in cameras:
@@ -146,13 +150,26 @@ async def run_follower(teleop_device, robot_name, robot_role, api_key):
         for camera in cameras:
             await camera.close()
 
-async def run_leader(teleop_device, robot_name, robot_role, api_key):
+k_guardStatusTimeout = 1.0  # (s) without robot telemetry before the leader unlocks; the robot still holds its stop
+
+async def lock_loop(teleop_device, lock, latest):
+    # Mirror the robot's collision stop on this leader, using the guard status from its telemetry
+    while True:
+        status = latest["guard"] if time.monotonic() - latest["time"] <= k_guardStatusTimeout else {}
+        try:
+            lock.update(status, teleop_device.get_position(), teleop_device.get_current())
+        except Exception as error:  # a bus hiccup must not stop teleop
+            logger.warning("Leader lock update failed: %s", error)
+        await asyncio.sleep(0.02)
+
+async def run_leader(teleop_device, lock, robot_name, robot_role, api_key):
     # Act as the direct client; name/role identify the follower to control
     base = SERVER_URL.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
     path = f"/api/webrtc/client/offer/{quote(robot_name, safe='')}/{quote(robot_role, safe='')}"
     delay = 0.5
     while True:
         pc = None
+        locker = None
         try:
             async with aiohttp.ClientSession(headers={"X-API-Key": api_key}, timeout=aiohttp.ClientTimeout(total=40)) as http:
                 async with http.get(f"{base}/api/webrtc/ice-servers") as response:
@@ -164,6 +181,17 @@ async def run_leader(teleop_device, robot_name, robot_role, api_key):
                 channel = pc.createDataChannel("teleop", ordered=False, maxRetransmits=0)
                 ready = asyncio.Event()
                 channel.on("open", ready.set)
+                latest = {"guard": {}, "time": 0.0}
+
+                @channel.on("message")
+                def on_message(message):
+                    # Robot telemetry carries the collision guard's status; keep the newest one
+                    try:
+                        guard_status = json.loads(message).get("guard")
+                    except (ValueError, AttributeError):
+                        return
+                    if isinstance(guard_status, dict):
+                        latest["guard"], latest["time"] = guard_status, time.monotonic()
                 await pc.setLocalDescription(await pc.createOffer())
                 async with http.ws_connect(f"{base}{path}", params={"api_key": api_key}) as ws:
                     await ws.send_json({
@@ -187,10 +215,15 @@ async def run_leader(teleop_device, robot_name, robot_role, api_key):
                     channel.send(json.dumps(message))
                     return True
 
+                locker = asyncio.create_task(lock_loop(teleop_device, lock, latest))
                 await send_loop(send_direct, teleop_device)
         except (aiohttp.ClientError, ConnectionError, TimeoutError) as error:
             logger.warning("Direct RTC disconnected: %s; retrying", error)
         finally:
+            if locker is not None:
+                locker.cancel()
+                await asyncio.gather(locker, return_exceptions=True)
+                lock.release()  # no link to the robot: leave the leader free
             if pc is not None:
                 await pc.close()
         await asyncio.sleep(delay)
@@ -212,35 +245,48 @@ def main():
     parser.add_argument("--robot-name", required=True, help="Robot name used for server routing")
     parser.add_argument("--robot-role", required=True, help="Robot role, e.g. Base")
     parser.add_argument("--type", choices=("Follower", "Leader"), required=True, help="Arm type")
+    parser.add_argument("--port", default="auto", help="Serial port of the arm, e.g. COM6 or /dev/ttyACM0 (default: auto-detect)")
+    parser.add_argument("--guard-log", action="store_true", help="Follower: write a collision-guard CSV to local_logs/")
+    parser.add_argument("--lock-torque", type=float, default=50, help="Leader: holding strength while the robot is stopped, %% of max (default 50)")
     args = parser.parse_args()
     teleop_device = None
+    guard = lock = None
     try:
         api_key = load_api_key()
         if args.type == "Follower":
             teleop_config = FollowerRobotConfig(
-                port="auto",
+                port=args.port,
                 id="PrimoFollower",
                 calibration_dir=Path("RobotFiles/calibration/follower")
             )
             teleop_device = Follower(teleop_config)
             teleop_device.connect()
-            asyncio.run(run_follower(teleop_device, args.robot_name, args.robot_role, api_key))
+            guard = CollisionGuard(teleop_device, log_dir=WORKSPACE_DIR / "local_logs" if args.guard_log else None).start()
+            asyncio.run(run_follower(teleop_device, guard, args.robot_name, args.robot_role, api_key))
 
         elif args.type == "Leader":
             teleop_config = LeaderTeleopConfig(
-                port="auto",
+                port=args.port,
                 id="PrimoLeader",
                 calibration_dir=Path("RobotFiles/calibration/leader")
             )
             teleop_device = Leader(teleop_config)
             teleop_device.connect()
-            asyncio.run(run_leader(teleop_device, args.robot_name, args.robot_role, api_key))
+            lock = LeaderLock(teleop_device, torque_pct=args.lock_torque).start()
+            asyncio.run(run_leader(teleop_device, lock, args.robot_name, args.robot_role, api_key))
         
     except KeyboardInterrupt:
         print("\nStopping...")
     
 
     finally:
+        if guard is not None:
+            guard.stop()  # before disconnect, so nothing writes to a closed bus
+        if lock is not None:
+            try:
+                lock.close()  # leader limp again, torque limits restored
+            except Exception as error:
+                print(f"Leader lock cleanup failed: {error}")
         if teleop_device is not None and teleop_device.is_connected:
             teleop_device.disconnect()
         print("Shutdown complete")

@@ -1,12 +1,14 @@
 """Run a local leader-to-follower arm test without WebRTC."""
 
 import argparse
+import logging
 from pathlib import Path
 import threading
 import time
 
 from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
 from RobotFiles.Drivers.FollowerArm import FollowerRobotConfig, Follower
+from RobotFiles.CollisionGuard import CollisionGuard, LeaderLock
 
 
 k_readFreq = 100  # (Hz) rate the leader joints are read and the follower updated (RL-4.1)
@@ -33,23 +35,29 @@ def get_all_states(device):
     }
 
 
-def run_leader_local(device):
+def run_leader_local(device, guard, lock):
     global leader_state
     while not stop_event.is_set():
         state = get_all_states(device)
         with leader_state_lock:
             leader_state = state
+        # Mirror a follower stop on the leader: lock every joint but the tripped one
+        try:
+            lock.update(guard.status(), {motor: data["position"] for motor, data in state["motors"].items()},
+                        {motor: data["current"] for motor, data in state["motors"].items()})
+        except Exception as exc:  # a failed lock write must not stop teleop; the follower guard still holds
+            logging.warning("Leader lock update failed: %s", exc)
         time.sleep(1 / k_readFreq)
 
 
-def run_follower_local(device):
+def run_follower_local(guard):
+    # The collision guard owns the follower's goals; this loop only passes it the leader pose
     while not stop_event.is_set():
         with leader_state_lock:
             state = leader_state
-        print(state)
         if state is not None:
-            c_followerPos = {f"{motor}.pos": data["position"] for motor, data in state["motors"].items()}
-            device.send_action(c_followerPos)
+            m_leaderPos = {motor: data["position"] for motor, data in state["motors"].items()}
+            guard.set_target(m_leaderPos)
         time.sleep(1 / k_readFreq)
 
 
@@ -57,7 +65,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--leader-port", default="COM3", help="Leader arm serial port (default: COM3)")
     parser.add_argument("--follower-port", default="COM4", help="Follower arm serial port (default: COM4)")
+    parser.add_argument("--guard-log", action="store_true", help="Write a collision-guard CSV to local_logs/")
+    parser.add_argument("--lock-torque", type=float, default=50, help="Leader holding strength while locked, %% of max (default 50)")
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", force=True)
 
     leader = Leader(LeaderTeleopConfig(
         port=args.leader_port,
@@ -70,12 +81,15 @@ def main():
         calibration_dir=Path("RobotFiles/calibration/follower"),
     ))
     threads = []
+    guard = lock = None
     try:
         leader.connect()
         follower.connect()
+        guard = CollisionGuard(follower, log_dir="local_logs" if args.guard_log else None).start()
+        lock = LeaderLock(leader, torque_pct=args.lock_torque).start()
         threads = [
-            threading.Thread(target=run_leader_local, args=(leader,)),
-            threading.Thread(target=run_follower_local, args=(follower,)),
+            threading.Thread(target=run_leader_local, args=(leader, guard, lock)),
+            threading.Thread(target=run_follower_local, args=(guard,)),
         ]
         for thread in threads:
             thread.start()
@@ -89,6 +103,13 @@ def main():
         for thread in threads:
             if thread.ident is not None:
                 thread.join(timeout=2.0)
+        if lock is not None:
+            try:
+                lock.close()  # leader limp again, torque limits restored
+            except Exception as exc:
+                print(f"Leader lock cleanup failed: {exc}")
+        if guard is not None:
+            guard.stop()  # before disconnect, so nothing writes to a closed bus
         for device in (leader, follower):
             if device.is_connected:
                 device.disconnect()
