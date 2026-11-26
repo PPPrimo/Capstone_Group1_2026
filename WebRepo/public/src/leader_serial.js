@@ -1,3 +1,5 @@
+import { LeaderLock } from './leader_lock.js?v=20261126-1';
+
 const MOTOR_NAMES = ['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper'];
 const word = (bytes, offset = 0) => bytes[offset] | (bytes[offset + 1] << 8);
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -118,6 +120,7 @@ export function initSerialLeader(onConnected) {
         return { connected: () => false };
     }
     let leader = null;
+    let streaming = null;   // the running stream(); it releases the leader lock and closes the port when it ends
     let connecting = false;
     let stopped = false;
 
@@ -126,7 +129,12 @@ export function initSerialLeader(onConnected) {
     }
 
     async function stream(device) {
+        // Mirrors the robot's collision stop on this leader (see leader_lock.js). It runs in this loop
+        // because the serial link handles one request at a time.
+        const lock = new LeaderLock(device);
+        let lockedJoint = null;
         try {
+            await lock.start();
             while (leader === device) {
                 const positions = await device.getPositions();
                 if (leader !== device) break;
@@ -134,6 +142,21 @@ export function initSerialLeader(onConnected) {
                     timestamp: Date.now() / 1000,
                     leadState: { motors: Object.fromEntries(Object.entries(positions).map(([motor, position]) => [motor, { position }])) }
                 });
+                try {
+                    await lock.update(window.liveWebRTC.guardStatus(), positions);
+                } catch (error) {
+                    // A failed lock write must not stop teleop; the robot's guard still holds its stop.
+                    if (!expected(error)) throw error;
+                    console.warn('Leader lock update failed:', error.message);
+                }
+                if (lock.joint !== lockedJoint) {
+                    lockedJoint = lock.joint;
+                    if (lockedJoint !== null) {
+                        status.textContent = `Robot stopped: leader locked, move ${lockedJoint} back to resume`;
+                    } else {
+                        status.textContent = 'Leader connected — 6 motors';
+                    }
+                }
                 await sleep(100);
             }
         } catch (error) {
@@ -142,6 +165,11 @@ export function initSerialLeader(onConnected) {
         } finally {
             if (leader === device) leader = null;
             master.checked = false;
+            try {
+                await lock.close();   // leader limp again and torque limits restored, before the port closes
+            } catch (error) {
+                console.warn('Leader lock cleanup failed:', error.message);
+            }
             await device.close();
             button.textContent = 'Connect leader';
         }
@@ -168,7 +196,7 @@ export function initSerialLeader(onConnected) {
                 button.textContent = 'Disconnect leader';
                 status.textContent = 'Leader connected — 6 motors';
                 onConnected();
-                void stream(device);
+                streaming = stream(device);
                 return;
             }
         } finally {
@@ -180,10 +208,11 @@ export function initSerialLeader(onConnected) {
     button.addEventListener('click', async () => {
         if (leader) {
             stopped = true;
-            const device = leader;
-            leader = null;
+            leader = null;   // stream() sees this, unlocks the leader, then closes the port
             master.checked = false;
-            await device.close();
+            if (streaming !== null) {
+                await streaming.catch(() => {});
+            }
             button.textContent = 'Connect leader';
             status.textContent = 'Leader disconnected.';
             return;

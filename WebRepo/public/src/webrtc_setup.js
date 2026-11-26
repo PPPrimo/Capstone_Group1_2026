@@ -1,5 +1,5 @@
-import { initLiveWebRTC } from '/api/webrtc/live_webrtc.js?v=20261102-2';
-import { initSerialLeader } from './leader_serial.js?v=20261104-1';
+import { initLiveWebRTC } from '/api/webrtc/live_webrtc.js?v=20261126-1';
+import { initSerialLeader } from './leader_serial.js?v=20261126-1';
 
 const CONFIG = {
     robotName: '',

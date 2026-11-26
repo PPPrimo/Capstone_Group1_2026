@@ -13,6 +13,8 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
     let reconnectDelay = 500;
     let paused = false;
     let authBlocked = false;
+    let guardStatus = null;   // latest collision-guard status from the robot's telemetry
+    let guardTime = 0;        // when it arrived (ms)
 
     function enabled() {
         return CONFIG.robotName && CONFIG.robotRole && toggle.value !== 'None' && !paused && !authBlocked;
@@ -44,6 +46,8 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         clearTimeout(old.deadline);
         clearTimeout(old.disconnectTimer);
         latency.textContent = 'Latency: N/A';
+        latency.style.color = '';
+        guardStatus = null;
         if (old.ws) {
             old.ws.onclose = null;
             old.ws.onerror = null;
@@ -115,6 +119,8 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
         // Collision guard status from the robot (repeated in every telemetry message).
         latency.style.color = '';
         if (obj.guard) {
+            guardStatus = obj.guard;    // the leader lock in leader_serial.js reads this
+            guardTime = Date.now();
             if (obj.guard.state === 'stopped') {
                 latency.textContent += `  |  STOPPED: collision on ${obj.guard.joint}. Back the leader off ${obj.guard.back_off_deg}° to resume.`;
                 latency.style.color = 'red';
@@ -293,6 +299,14 @@ export function initLiveWebRTC(CONFIG, { el, toggle, retry, master, latency, vid
 
     window.liveWebRTC = {
         refresh: syncMode,
+        guardStatus() {
+            // The robot's latest collision-guard status, or null if none arrived in the last second
+            // (then the leader lock unlocks; the robot still holds its own stop).
+            if (guardStatus === null || Date.now() - guardTime > 1000) {
+                return null;
+            }
+            return guardStatus;
+        },
         sendControl(message) {
             const s = session;
             if (!master.checked || !current(s) || s.channel?.readyState !== 'open') return false;
