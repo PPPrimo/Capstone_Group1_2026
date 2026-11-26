@@ -1,10 +1,11 @@
-"""USB camera capture and a continuous RTC video track (Python 3.11+)."""
+"""Grabs frames from the USB cameras and keeps a WebRTC video track going (Python 3.11+)"""
 import asyncio
 import logging
 import threading
 import time
 from datetime import datetime
 from fractions import Fraction
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -14,27 +15,26 @@ from av import VideoFrame
 
 logger = logging.getLogger(__name__)
 CAMERA_SOURCE = 0
-# Requirements: k_resMin = 640x480 per camera, k_fpsMin = 20 fps. 24 fps leaves margin
-# for dropped frames while encoding 20% fewer frames than 30 fps
+# Requirements want at least 640x480 per camera (k_resMin) and 20 fps (k_fpsMin)
+# 24 fps gives some room for dropped frames and is 20% less encoding than 30
 VIDEO_WIDTH = 640
 VIDEO_HEIGHT = 480
 VIDEO_FPS = 24
 k_fpsMin = 20
-k_videoStale = 1.0  # Seconds before an old frame is treated as missing (frozen video)
+k_videoStale = 1.0  # (s) frames older than this count as frozen video
 
-# Encoder budget per 640x480 camera. A capped bitrate keeps queues short (k_videoLatency = 300 ms)
+# Bitrate budget per 640x480 camera, capping it keeps network queues short (k_videoLatency = 300 ms)
 MAX_BITRATE_PER_CAMERA = 500_000
 START_BITRATE_PER_CAMERA = 300_000
 MIN_BITRATE_PER_CAMERA = 100_000
 
 
 def limit_video_bitrate(cameras=1, maximum=None, start=None, minimum=None):
-    """Cap aiortc's VP8/H.264 encoder bitrate; affects encoders created after the call
+    """Caps aiortc's VP8/H.264 bitrate, only affects encoders made after this runs
 
-    By default the per-camera budget is multiplied by `cameras`, since side-by-side
-    cameras share one encoded frame. Call before RobotRTC.connect().
-    aiortc has no public API for this, so it adjusts the clamp constants its encoders
-    read when created and on every bandwidth-estimate update.
+    The per-camera budget gets multiplied by `cameras` since side-by-side cameras share one frame,
+    so call it before RobotRTC.connect()
+    aiortc has no setting for this, so we overwrite the limits its encoders read instead
     """
     maximum = maximum or MAX_BITRATE_PER_CAMERA * cameras
     start = start or START_BITRATE_PER_CAMERA * cameras
@@ -51,6 +51,24 @@ def limit_video_bitrate(cameras=1, maximum=None, start=None, minimum=None):
 
 
 limit_video_bitrate()
+
+
+def find_usb_cameras(root="/sys/class/video4linux"):
+    """Finds the plugged-in USB cameras and returns their /dev/videoN numbers, one per camera"""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    found = []
+    for node in root.glob("video*"):
+        try:
+            if "/usb" not in str((node / "device").resolve()):
+                continue
+            if (node / "index").read_text().strip() != "0":  # 0 is the actual video stream, others are metadata
+                continue
+        except OSError:
+            continue
+        found.append(int(node.name.removeprefix("video")))
+    return sorted(found)
 
 
 class CameraSource:
@@ -77,11 +95,11 @@ class CameraSource:
         logger.info("%s opened", self.name)
 
     def capture(self):
-        """Grab one frame; returns a BGR uint8 array of the configured size, or None on failure"""
+        """Grabs one frame at the configured size (BGR), or None if the read fails"""
         ok, frame = self._camera.read()
         if not ok:
             return None
-        # Cameras may ignore the requested size; never send more pixels than configured.
+        # Some cameras ignore the size we ask for, so shrink anything bigger
         if frame.shape[:2] != (self.height, self.width):
             frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
         return frame
@@ -99,7 +117,7 @@ class CameraSource:
         return self
 
     def latest_frame(self):
-        """Return the newest frame, or None if there is no frame from the last k_videoStale seconds"""
+        """Newest frame, or None if nothing came in during the last k_videoStale seconds"""
         with self._lock:
             if time.monotonic() - self._m_sceneTime > k_videoStale:
                 return None
@@ -154,12 +172,12 @@ class SideBySide:
 
 
 class SwitchableVideoTrack(VideoStreamTrack):
-    """One negotiated track: a timestamp placeholder until the supplied source has fresh video.
+    """One video track that shows a placeholder until the source has fresh frames
 
-    Sources implement nonblocking latest_frame() -> BGR uint8 ndarray | None.
-    Camera frames are sent at their own size; width/height only set the placeholder's size.
-    This track does not own or close the source; the caller manages its lifetime.
-    Set the source from the RTC event loop. No SDP renegotiation is required.
+    A source just needs a nonblocking latest_frame() that gives a BGR array or None
+    Camera frames go out at their own size, width/height only size the placeholder
+    The track never closes the source, whoever made it handles that
+    Swap the source from the RTC event loop, no SDP renegotiation needed
     """
     def __init__(self, source=None, width=VIDEO_WIDTH, height=VIDEO_HEIGHT, fps=VIDEO_FPS):
         super().__init__()
@@ -187,7 +205,7 @@ class SwitchableVideoTrack(VideoStreamTrack):
 
         image = self.source.latest_frame() if self.source is not None else None
 
-        # No fresh camera frame: show a placeholder the operator can't mistake for live video (hazard H-2)
+        # No fresh frame, so show something nobody will mistake for live video (hazard H-2)
         if image is None:
             image = self._placeholder_frame()
 

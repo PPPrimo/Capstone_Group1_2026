@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 
-from RobotFiles.WebRTC import CameraSource, SideBySide
+from RobotFiles.WebRTC import CameraSource, SideBySide, find_usb_cameras
 from RobotFiles.WebRTC.RtcVideo import k_fpsMin
 
 
@@ -56,13 +56,14 @@ async def run(cameras: list[CameraSource], seconds: float, output: Path) -> bool
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Test camera capture")
-    parser.add_argument("--source", nargs="+", default=["0"], help="USB camera indexes (0, 1, ...) or device paths")
+    parser.add_argument("--source", nargs="+", help="USB camera indexes (0, 2, ...) or device paths (default: every USB camera found)")
     parser.add_argument("--seconds", type=float, default=3.0, help="How long to measure FPS")
     parser.add_argument("--output", type=Path, default=Path("snapshot.jpg"))
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    cameras = [CameraSource(source=int(source) if source.isdigit() else source) for source in args.source]
+    sources = args.source or [str(n) for n in find_usb_cameras()] or ["0"]
+    cameras = [CameraSource(source=int(source) if source.isdigit() else source) for source in sources]
     ok = asyncio.run(run(cameras, args.seconds, args.output))
     raise SystemExit(0 if ok else 1)
 

@@ -2,7 +2,7 @@
 
 from RobotFiles.Drivers.FollowerArm import FollowerRobotConfig, Follower
 from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
-from RobotFiles.WebRTC import RobotRTC, CameraSource, SideBySide, limit_video_bitrate
+from RobotFiles.WebRTC import RobotRTC, CameraSource, SideBySide, find_usb_cameras, limit_video_bitrate
 
 from RobotFiles.WebRTC import RobotRTC
 
@@ -21,11 +21,6 @@ import logging
 import aiohttp
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
-# USB cameras streamed to the browser side by side, 640x480 each (k_resMin)
-CAMERAS = [
-    {"source": 0},
-    {"source": 2},
-]
 
 SERVER_URL = os.getenv("PUBLISH_URL", "https://primowang.com/").rstrip("/")
 
@@ -122,12 +117,20 @@ async def send_loop(send_control, teleop_device):
             last_status = time.monotonic()        
         await asyncio.sleep(1 / k_readFreq)
 
-async def run_follower(teleop_device, robot_name, robot_role, api_key):
-    # The track only reads latest_frame(); we own the cameras and close them after RTC
-    limit_video_bitrate(cameras=len(CAMERAS))  # Bitrate budget scales with the cameras
-    cameras = [CameraSource(**camera).start() for camera in CAMERAS]
+async def run_follower(teleop_device, robot_name, robot_role, api_key, camera_sources=None):
+    # USB cameras go side by side at 640x480 each (k_resMin)
+    # By default we grab every USB camera plugged in and skip the Pi's CSI ribbon camera
+    if camera_sources is None:
+        camera_sources = find_usb_cameras()
+    if camera_sources:
+        logger.info("Streaming USB cameras: %s", ", ".join(f"/dev/video{n}" for n in camera_sources))
+    else:
+        logger.warning("No USB cameras found; streaming the NO VIDEO placeholder")
+    limit_video_bitrate(cameras=max(1, len(camera_sources)))  # More cameras get more bitrate
+    # The track only reads latest_frame(), we own the cameras and close them after RTC
+    cameras = [CameraSource(source=n).start() for n in camera_sources]
     rtc = RobotRTC(
-        video_source = cameras[0] if len(cameras) == 1 else SideBySide(*cameras),
+        video_source = None if not cameras else cameras[0] if len(cameras) == 1 else SideBySide(*cameras),
         SERVER_URL = SERVER_URL, 
         ROBOT_NAME = robot_name,
         ROBOT_ROLE = robot_role,
@@ -213,6 +216,8 @@ def main():
     parser.add_argument("--robot-name", required=True, help="Robot name used for server routing")
     parser.add_argument("--robot-role", required=True, help="Robot role, e.g. Base")
     parser.add_argument("--type", choices=("Follower", "Leader"), required=True, help="Arm type")
+    parser.add_argument("--cameras", type=int, nargs="*", default=None,
+                        help="Follower: /dev/videoN numbers to stream, e.g. --cameras 0 2 (default: every USB camera found)")
     args = parser.parse_args()
     teleop_device = None
     try:
@@ -225,7 +230,7 @@ def main():
             )
             teleop_device = Follower(teleop_config)
             teleop_device.connect()
-            asyncio.run(run_follower(teleop_device, args.robot_name, args.robot_role, api_key))
+            asyncio.run(run_follower(teleop_device, args.robot_name, args.robot_role, api_key, args.cameras))
 
         elif args.type == "Leader":
             teleop_config = LeaderTeleopConfig(
