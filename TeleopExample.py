@@ -2,7 +2,7 @@
 
 from RobotFiles.Drivers.FollowerArm import FollowerRobotConfig, Follower
 from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
-from RobotFiles.WebRTC import RobotRTC, CameraSource, SideBySide 
+from RobotFiles.WebRTC import RobotRTC, CameraSource, SideBySide, limit_video_bitrate
 
 from RobotFiles.WebRTC import RobotRTC
 
@@ -21,10 +21,10 @@ import logging
 import aiohttp
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
-# Cameras streamed to the browser
+# USB cameras streamed to the browser side by side, 640x480 each (k_resMin)
 CAMERAS = [
-    {"source": 0, "backend": "opencv"},   # USB webcam (/dev/video0)
-    {"backend": "picamera2"},             # Pi ribbon camera
+    {"source": 0},
+    {"source": 2},
 ]
 
 SERVER_URL = os.getenv("PUBLISH_URL", "https://primowang.com/").rstrip("/")
@@ -123,7 +123,8 @@ async def send_loop(send_control, teleop_device):
         await asyncio.sleep(1 / k_readFreq)
 
 async def run_follower(teleop_device, robot_name, robot_role, api_key):
-    # The track only reads latest_frame(); we own the cameras and close them after RTC.
+    # The track only reads latest_frame(); we own the cameras and close them after RTC
+    limit_video_bitrate(cameras=len(CAMERAS))  # Bitrate budget scales with the cameras
     cameras = [CameraSource(**camera).start() for camera in CAMERAS]
     rtc = RobotRTC(
         video_source = cameras[0] if len(cameras) == 1 else SideBySide(*cameras),

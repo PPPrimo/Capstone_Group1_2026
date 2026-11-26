@@ -1,11 +1,3 @@
-"""Check that the cameras capture real frames, without WebRTC.
-
-Run from the repo root:
-    python -m RobotFiles.helpers.CameraTester                      # USB camera 0
-    python -m RobotFiles.helpers.CameraTester --source 2           # another /dev/videoN
-    python -m RobotFiles.helpers.CameraTester --backend picamera2  # Pi ribbon camera
-    python -m RobotFiles.helpers.CameraTester --both               # USB + ribbon side by side
-"""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +9,7 @@ from pathlib import Path
 import cv2
 
 from RobotFiles.WebRTC import CameraSource, SideBySide
+from RobotFiles.WebRTC.RtcVideo import k_fpsMin
 
 
 async def run(cameras: list[CameraSource], seconds: float, output: Path) -> bool:
@@ -45,8 +38,11 @@ async def run(cameras: list[CameraSource], seconds: float, output: Path) -> bool
                 print(f"FAIL {camera.name}: no frames")
                 ok = False
             else:
+                fps = count / seconds
+                status = "OK  " if fps >= k_fpsMin else "FAIL"
+                ok = ok and fps >= k_fpsMin
                 # Brightness: 0 = black, 255 = white; a normally lit room is roughly 80-150.
-                print(f"OK   {camera.name}: {frame.shape}, ~{count / seconds:.1f} fps, brightness {frame.mean():.0f}/255")
+                print(f"{status} {camera.name}: {frame.shape}, ~{fps:.1f} fps (min {k_fpsMin}), brightness {frame.mean():.0f}/255")
 
         picture = SideBySide(*cameras).latest_frame()
         if picture is not None:
@@ -60,19 +56,13 @@ async def run(cameras: list[CameraSource], seconds: float, output: Path) -> bool
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Test camera capture")
-    parser.add_argument("--source", default="0", help="USB camera index (0, 1, ...) or device path")
-    parser.add_argument("--backend", default="opencv", choices=["opencv", "picamera2"])
-    parser.add_argument("--both", action="store_true", help="Test the USB and ribbon cameras together")
+    parser.add_argument("--source", nargs="+", default=["0"], help="USB camera indexes (0, 1, ...) or device paths")
     parser.add_argument("--seconds", type=float, default=3.0, help="How long to measure FPS")
     parser.add_argument("--output", type=Path, default=Path("snapshot.jpg"))
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    source = int(args.source) if args.source.isdigit() else args.source
-    if args.both:
-        cameras = [CameraSource(source=source, backend="opencv"), CameraSource(backend="picamera2")]
-    else:
-        cameras = [CameraSource(source=source, backend=args.backend)]
+    cameras = [CameraSource(source=int(source) if source.isdigit() else source) for source in args.source]
     ok = asyncio.run(run(cameras, args.seconds, args.output))
     raise SystemExit(0 if ok else 1)
 
