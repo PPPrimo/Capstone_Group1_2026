@@ -66,8 +66,8 @@ k_readFreq = 10  # (Hz) rate the arm joints are read and sent (RL-4.1)
 
 def sync_states_to_follower(device, leader_state: dict):
     # Convert leader joint angles received over WebRTC into follower position targets (RF-3.2)
-    if leader_state is None or "motors" not in leader_state:
-        return
+    if device is None or leader_state is None or "motors" not in leader_state:
+        return  # no arm (--no-arm) or nothing to move
     m_leaderPos = {motor: data["position"] for motor, data in leader_state["motors"].items()}
     c_followerPos = {f"{motor}.pos": angle for motor, angle in m_leaderPos.items()}
     device.send_action(c_followerPos)
@@ -97,13 +97,14 @@ async def send_loop(send_control, teleop_device):
         message = {
             "timestamp": time.time(),
             "latency_avg_ms": ctrlLatency_avg_ms,
-            "leadState": {
+        }
+        if teleop_device is not None:  # without an arm there are no joints to report
+            message["leadState"] = {
                 "motors": {
                     motor: {"position": position}
                     for motor, position in teleop_device.get_position().items()
                 }
-            },
-        }
+            }
         send_result = send_control(message)
         sent_count += bool(send_result)
         logger.debug("telemetry: %s", json.dumps({**message, "sent": send_result}))
@@ -218,18 +219,23 @@ def main():
     parser.add_argument("--type", choices=("Follower", "Leader"), required=True, help="Arm type")
     parser.add_argument("--cameras", type=int, nargs="*", default=None,
                         help="Follower: /dev/videoN numbers to stream, e.g. --cameras 0 2 (default: every USB camera found)")
+    parser.add_argument("--no-arm", action="store_true",
+                        help="Follower: stream video without an arm connected, received commands are only logged")
     args = parser.parse_args()
     teleop_device = None
     try:
         api_key = load_api_key()
         if args.type == "Follower":
-            teleop_config = FollowerRobotConfig(
-                port="auto",
-                id="PrimoFollower",
-                calibration_dir=Path("RobotFiles/calibration/follower")
-            )
-            teleop_device = Follower(teleop_config)
-            teleop_device.connect()
+            if args.no_arm:
+                logger.warning("--no-arm: streaming video only, the arm is not touched")
+            else:
+                teleop_config = FollowerRobotConfig(
+                    port="auto",
+                    id="PrimoFollower",
+                    calibration_dir=Path("RobotFiles/calibration/follower")
+                )
+                teleop_device = Follower(teleop_config)
+                teleop_device.connect()
             asyncio.run(run_follower(teleop_device, args.robot_name, args.robot_role, api_key, args.cameras))
 
         elif args.type == "Leader":
