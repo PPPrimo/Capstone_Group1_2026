@@ -1,11 +1,12 @@
 
 
 from RobotFiles.Drivers.FollowerArm import FollowerRobotConfig, Follower
+from RobotFiles.Drivers.FollowerArm.CollisionGuard import CollisionGuard, make_lead_state
 from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
+from RobotFiles.Drivers.LeaderArm.LeaderLock import LeaderLock
 from RobotFiles.WebRTC import RobotRTC, CameraSource, SideBySide 
 
 from RobotFiles.WebRTC import RobotRTC
-from RobotFiles.CollisionGuard import CollisionGuard, LeaderLock
 
 from pathlib import Path
 import argparse
@@ -24,11 +25,10 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, R
 
 # Cameras streamed to the browser
 CAMERAS = [
-    {"source": 0, "backend": "opencv"},   # USB webcam (/dev/video0)
-    {"backend": "picamera2"},             # Pi ribbon camera
+    {"source": 0, "backend": "opencv"}   # USB webcam (/dev/video0)
 ]
 
-SERVER_URL = os.getenv("PUBLISH_URL", "https://primowang.com/").rstrip("/")
+SERVER_URL = os.getenv("PUBLISH_URL", "https://teleopdeck.com/").rstrip("/")
 
 ## Logger start
 from logging.handlers import TimedRotatingFileHandler
@@ -62,6 +62,7 @@ logging.getLogger("aioice.ice").addFilter(IceLogFilter())
 logger = logging.getLogger(__name__)
 ## Logger end
 
+"""Global Variables Start"""
 ctrlLatency_log = [0.0] * 10  # (ms) Recent leader-to-follower latencies
 ctrlLatency_log_lock = threading.Lock()
 received_count = 0
@@ -69,13 +70,6 @@ STATUS_PERIOD = 5.0
 stop_event = threading.Event()
 k_readFreq = 10  # (Hz) rate the arm joints are read and sent (RL-4.1)
 """Global Variables End"""
-
-def sync_states_to_follower(guard, leader_state: dict):
-    # Hand leader joint angles received over WebRTC to the collision guard, which moves the follower (RF-3.2)
-    if leader_state is None or "motors" not in leader_state:
-        return
-    m_leaderPos = {motor: data["position"] for motor, data in leader_state["motors"].items()}
-    guard.set_target(m_leaderPos)
 
 async def receive_loop(rtc, guard):
     global received_count
@@ -88,32 +82,25 @@ async def receive_loop(rtc, guard):
             ctrlLatency_log.append(ctrlLatency_ms)
             received_count += 1
         if "leadState" in control:
-            sync_states_to_follower(guard, control["leadState"])
+            guard.submit_leader_state(control["leadState"])
         logger.info("Received control: %r", control)
 
 
-async def send_loop(send_control, teleop_device, guard=None):
+async def send_loop(send_control, get_lead_state, guard=None):
     global received_count
     sent_count = 0
     last_status = time.monotonic()
     while True:
         with ctrlLatency_log_lock:
             ctrlLatency_avg_ms = sum(ctrlLatency_log) / len(ctrlLatency_log)
-        # With a guard, reuse its latest read instead of a second bus read
-        m_armPos = None
-        if guard is not None:
-            m_armPos = guard.positions()
-        if m_armPos is None:
-            m_armPos = teleop_device.get_position()
+        lead_state = get_lead_state()
+        if lead_state is None:
+            await asyncio.sleep(1 / k_readFreq)
+            continue
         message = {
             "timestamp": time.time(),
             "latency_avg_ms": ctrlLatency_avg_ms,
-            "leadState": {
-                "motors": {
-                    motor: {"position": position}
-                    for motor, position in m_armPos.items()
-                }
-            },
+            "leadState": lead_state,
         }
         if guard is not None:
             message["guard"] = guard.status()  # repeated every send, so a lost packet doesn't hide a stop
@@ -130,7 +117,7 @@ async def send_loop(send_control, teleop_device, guard=None):
             last_status = time.monotonic()        
         await asyncio.sleep(1 / k_readFreq)
 
-async def run_follower(teleop_device, guard, robot_name, robot_role, api_key):
+async def run_follower(guard, robot_name, robot_role, api_key):
     # The track only reads latest_frame(); we own the cameras and close them after RTC.
     cameras = [CameraSource(**camera).start() for camera in CAMERAS]
     rtc = RobotRTC(
@@ -146,7 +133,7 @@ async def run_follower(teleop_device, guard, robot_name, robot_role, api_key):
         logger.info("RTC connected")
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(receive_loop(rtc, guard))
-            tasks.create_task(send_loop(rtc.send_control, teleop_device, guard))
+            tasks.create_task(send_loop(rtc.send_control, guard.lead_state, guard))
     finally:
         await rtc.close()
         for camera in cameras:
@@ -164,8 +151,11 @@ async def lock_loop(teleop_device, lock, latest):
             status = latest["guard"]
         else:
             status = {}
+        latest["lead_state"] = None
         try:
-            lock.update(status, teleop_device.get_position(), teleop_device.get_current())
+            positions = teleop_device.get_position()
+            latest["lead_state"] = make_lead_state(positions)
+            lock.update(status, positions, teleop_device.get_current())
         except Exception as error:  # a bus hiccup must not stop teleop
             logger.warning("Leader lock update failed: %s", error)
         await asyncio.sleep(0.02)
@@ -189,7 +179,7 @@ async def run_leader(teleop_device, lock, robot_name, robot_role, api_key):
                 channel = pc.createDataChannel("teleop", ordered=False, maxRetransmits=0)
                 ready = asyncio.Event()
                 channel.on("open", ready.set)
-                latest = {"guard": {}, "time": 0.0}
+                latest = {"guard": {}, "time": 0.0, "lead_state": None}
 
                 @channel.on("message")
                 def on_message(message):
@@ -225,7 +215,7 @@ async def run_leader(teleop_device, lock, robot_name, robot_role, api_key):
                     return True
 
                 locker = asyncio.create_task(lock_loop(teleop_device, lock, latest))
-                await send_loop(send_direct, teleop_device)
+                await send_loop(send_direct, lambda: latest["lead_state"])
         except (aiohttp.ClientError, ConnectionError, TimeoutError) as error:
             logger.warning("Direct RTC disconnected: %s; retrying", error)
         finally:
@@ -276,7 +266,7 @@ def main():
             else:
                 guard_log_dir = None
             guard = CollisionGuard(teleop_device, log_dir=guard_log_dir).start()
-            asyncio.run(run_follower(teleop_device, guard, args.robot_name, args.robot_role, api_key))
+            asyncio.run(run_follower(guard, args.robot_name, args.robot_role, api_key))
 
         elif args.type == "Leader":
             teleop_config = LeaderTeleopConfig(

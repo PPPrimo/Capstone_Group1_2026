@@ -92,7 +92,10 @@ class MotorDriver:
         return self._read("Acceleration")
 
     def get_current(self):
-        return self._read("Present_Current")
+        """Read each motor's current magnitude in milliamps."""
+        raw_current = self._read("Present_Current")
+        # Bit 15 encodes direction. The remaining bits count 6.5 mA each.
+        return {motor: (int(raw) & 0x7FFF) * 6.5 for motor, raw in raw_current.items()}
 
     @check_if_not_connected
     def set_position(self, positions):

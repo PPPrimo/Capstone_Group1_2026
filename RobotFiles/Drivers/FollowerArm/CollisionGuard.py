@@ -1,22 +1,4 @@
-"""
-This file describes the collision process for the robotic arms and what happens when they bump into something. 
-The purpose of this file has two components:
-1. To program so that the follower arm stops if any joints reach over, drawing a certain current over a set period of time. 
-The whole follower arm freezes in that position until the leader arm moves in a direction that is against the point of resistance,
-allowing the arm to move freely again.
-2. For how the detection works: when the follower arm's Present_Current is averaged out over a period of seconds,
-that means a fast movement will cause a spike but won't trigger the threshold to hit. It has to be a sustained spike.
-Then that specific joint that gets over-torqued, so the whole arm freezes, but all joints get frozen on the follower arm.
-In order to resume, the leader's tripped joint needs to go in the opposite rotation of the direction that caused the freezing,
-and then the follower will glide to the new target that the leader is in and start following again.
-Additional implementation is the LeaderLock, where, when the follower freezes because it collides,
-all joints on the follow-on leader freeze as well (except that, in this unique case,
-the joint that actually is being over-torqued and gets frozen on the leader arm).
-You can only move that joint in the rotation that will unlock both the follower and the leader to the beginning.
-This allows the user to see exactly which area was impacted and easily navigate into an orientation that will stop from being blocked.
-All of the limits were determined via testing and measuring the torques when manually applying resistance to individual joints.
-
-"""
+"""Detect sustained motor current and hold the follower until the leader backs off."""
 
 import csv
 import logging
@@ -27,22 +9,20 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-k_maPerCount = 6.5
-
 k_currentLimit = {
     #all limits were determined through testing and measuring the torques when manually applying resistance to individual joints.
-    "shoulder_pan": 200,   
-    "shoulder_lift": 600,  
-    "elbow_flex": 850,              
-    "wrist_flex": 200,     
-    "wrist_roll": 150,     
-    "gripper": 400,       
+    "shoulder_pan": 200,
+    "shoulder_lift": 600,
+    "elbow_flex": 850,
+    "wrist_flex": 200,
+    "wrist_roll": 150,
+    "gripper": 400,
 }
 
 
-def current_ma(raw):
-    #measures the current in mA from the raw Present_Current value, which is a 16-bit signed integer.
-    return (int(raw) & 0x7FFF) * k_maPerCount
+def make_lead_state(positions):
+    return {"motors": {motor: {"position": position} for motor, position in positions.items()}}
+
 
 #for the follower arm, current limits cause a stop
 class CollisionGuard:
@@ -79,9 +59,11 @@ class CollisionGuard:
 
         # Shared with callers; always accessed under _lock.
         self._lock = threading.Lock()
+        self._pending_leader_state = None
         self._m_leaderPos = None
         self._reset = False
         self._m_followerPos = None
+        self._lead_state = None
         # direction: +1/-1 = the way the tripped joint was pushing (blocked for the leader), 0 when not stopped.
         self._status = {"state": "holding", "joint": None, "direction": 0, "back_off_deg": 0.0, "trips": 0}
 
@@ -94,26 +76,46 @@ class CollisionGuard:
         self._glide_s = 0.0      # glide duration
         self._started = False    # a target has arrived at least once
 
+        # Keep a guard decision and a motor write from interleaving. The WebRTC
+        # tasks use only _lock, so they never wait for a serial transaction.
+        self._motion_lock = threading.Lock()
+        self._pending_goal = None
+        self._applied_goal = None
+        self._command_ready = threading.Event()
         self._stop = threading.Event()
-        self._thread = None
+        self._position_thread = None
+        self._command_thread = None
         self._writer = None
 
     # ---- called from other threads / the asyncio loop ----
 
     def start(self):
-        self._thread = threading.Thread(target=self._run, name="collision-guard", daemon=True)
-        self._thread.start() #strating running the _run function in the background
+        self._command_thread = threading.Thread(
+            target=self._run_motor_commands, name="follower-motor-command", daemon=True,
+        )
+        self._position_thread = threading.Thread(
+            target=self._run_position_guard, name="follower-position-guard", daemon=True,
+        )
+        self._command_thread.start()
+        self._position_thread.start()
         return self
 
-    #stopps the thread allows for clean exiting of the program
     def stop(self):
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        self._command_ready.set()
+        for worker in (self._position_thread, self._command_thread):
+            if worker is not None and worker.ident is not None:
+                worker.join()
+
+    def submit_leader_state(self, leader_state):
+        # WebRTC hands off its decoded packet. The command worker extracts the joints.
+        with self._lock:
+            self._pending_leader_state = leader_state
+        self._command_ready.set()
 
     def set_target(self, m_leaderPos):
         #Latest leader pose, {joint: deg} (gripper 0-100). Ignored while stopped.
-        #so we know where to move to 
+        #so we know where to move to
         with self._lock:
             self._m_leaderPos = dict(m_leaderPos)
 
@@ -134,9 +136,53 @@ class CollisionGuard:
                 return None
             return dict(self._m_followerPos)
 
-    # ---- guard thread ----
+    def lead_state(self):
+        """Return the latest packet-ready motor snapshot. Callers treat it as read-only."""
+        with self._lock:
+            return self._lead_state
 
-    def _run(self):
+    def _run_motor_commands(self):
+        failures = 0
+        while not self._stop.is_set():
+            self._command_ready.wait()
+            self._command_ready.clear()
+            with self._lock:
+                leader_state = self._pending_leader_state
+                self._pending_leader_state = None
+            if leader_state is not None:
+                try:
+                    motors = leader_state["motors"]
+                    self.set_target({motor: motors[motor]["position"] for motor in self.motors})
+                except (KeyError, TypeError):
+                    logger.warning("Ignoring incomplete or invalid leader state")
+
+            with self._motion_lock:
+                if self._stop.is_set():
+                    return
+                goal = self._pending_goal
+                self._pending_goal = None
+                if goal is None:
+                    continue
+                try:
+                    self.follower.set_position(goal)
+                except Exception as exc:
+                    failures += 1
+                    if failures >= self.max_failures:
+                        self._set_fault("motor writes", exc)
+                        return
+                else:
+                    failures = 0
+                    self._applied_goal = goal
+
+    def _set_fault(self, operation, error):
+        # Called with _motion_lock held, so no goal can be written after a fault.
+        logger.error("Collision guard stopped: %s keep failing (%s)", operation, error)
+        with self._lock:
+            self._status["state"] = "fault"
+        self._stop.set()
+        self._command_ready.set()
+
+    def _run_position_guard(self):
         # Optional CSV log, one row per tick.
         log_file = None
         if self.log_dir is not None:
@@ -159,21 +205,27 @@ class CollisionGuard:
         try:
             while not self._stop.is_set():
                 tick = time.monotonic()
-                try:
-                    self._tick(tick - t0)
-                    failures = 0
-                except Exception as exc:  # bus hiccup: try again next tick, give up after max_failures in a row
-                    failures = failures + 1
-                    if failures >= self.max_failures:
-                        logger.error("Collision guard stopped: bus keeps failing (%s)", exc)
-                        with self._lock:
-                            self._status["state"] = "fault"
+                with self._motion_lock:
+                    if self._stop.is_set():
                         return
+                    if self._tripped is None:
+                        self._pending_goal = None
+                    try:
+                        self._tick(tick - t0)
+                        failures = 0
+                    except Exception as exc:
+                        self._pending_goal = None
+                        failures += 1
+                        if failures >= self.max_failures:
+                            self._set_fault("position guard ticks", exc)
+                            return
+                    if self._tripped is not None and self._applied_goal is not self._c_holdPos:
+                        self._pending_goal = self._c_holdPos
+                    if self._pending_goal is not None:
+                        self._command_ready.set()
                 # Sleep for whatever is left of this tick, so the loop runs at a steady rate.
                 time_used = time.monotonic() - tick
-                time_left = self.period - time_used
-                if time_left > 0:
-                    time.sleep(time_left)
+                self._stop.wait(max(0, self.period - time_used))
         finally:
             if log_file is not None:
                 log_file.close()
@@ -195,14 +247,13 @@ class CollisionGuard:
     def _tick(self, t):
         # read the followers data
         m_followerPos = self.follower.get_position()
-        raw_current = self.follower.get_current()
-        m_motorCurrent = {}
-        for m in raw_current:
-            m_motorCurrent[m] = current_ma(raw_current[m])
+        m_motorCurrent = self.follower.get_current()
+        lead_state = make_lead_state(m_followerPos)
 
         # changing the data that is shared with other threads, so we need to lock it to avoid race conditions
         with self._lock:
             self._m_followerPos = m_followerPos
+            self._lead_state = lead_state
 
             # Our own copy of the latest leader pose for this tick (every leader message has all 6 joints).
             if self._m_leaderPos is None: #only if no leader pos has arrived yet (aka the beginning)
@@ -211,10 +262,11 @@ class CollisionGuard:
                 m_leaderPos = {}
                 for m in self.motors:
                     m_leaderPos[m] = self._m_leaderPos[m]
-                    
+
 
             manual = self._reset
-            self._reset = False
+            if self._tripped is None or self._applied_goal is self._c_holdPos:
+                self._reset = False
 
         # rolling average for each joints current
         m_currentAvg = {}
@@ -223,6 +275,7 @@ class CollisionGuard:
             m_currentAvg[m] = sum(self.history[m]) / len(self.history[m])
 
         # What the follower is doing each tick: frozen (stop moving), holding (stay stopped), gliding to leader (after collision), or following leader (no collision)
+        was_tripped = self._tripped is not None
         if self._tripped is not None:
             c_followerPos = self._c_holdPos
         elif m_leaderPos is None:
@@ -240,7 +293,6 @@ class CollisionGuard:
                     c_followerPos[m] = self._glide_from[m] + s * (m_leaderPos[m] - self._glide_from[m])
                 if a >= 1.0:
                     self._glide_from = None
-            self.follower.set_position(c_followerPos)
 
         # is it over torqued if sso than trip it and freeze follower arm.
         if self._tripped is None:
@@ -258,20 +310,20 @@ class CollisionGuard:
                     m = worst
                     self._tripped = m
                     self._c_holdPos = dict(m_followerPos)
-                    # The follower lags behind its command, so the sign of (goal - actual) is the way it was pushing.
-                    if c_followerPos[m] - m_followerPos[m] >= 0:
+                    # Use the goal actually written to estimate which way the motor was pushing.
+                    last_goal = self._applied_goal if self._applied_goal is not None else c_followerPos
+                    if last_goal[m] - m_followerPos[m] >= 0:
                         self._trip_sign = 1
                     else:
                         self._trip_sign = -1
                     self._glide_from = None
-                    self.follower.set_position(self._c_holdPos)  # goal = where it is: stop pushing, keep holding
                     logger.warning("COLLISION on %s: %.0f mA avg > %.0f - follower frozen",
                                    m, m_currentAvg[m], self.k_currentLimit[m])
                     with self._lock:
                         self._status["trips"] = self._status["trips"] + 1
         else:
             back_off = self._back_off(m_leaderPos)
-            if manual or back_off < 0:
+            if self._applied_goal is self._c_holdPos and (manual or back_off < 0):
                 if manual:
                     logger.info("Collision guard resuming (manual reset)")
                 else:
@@ -286,7 +338,10 @@ class CollisionGuard:
                 for m in self.motors:
                     self.history[m].clear()  # forget the collision's high readings
 
-        #Publish status for the telemetry and the leader 
+        if not was_tripped and self._tripped is None and m_leaderPos is not None:
+            self._pending_goal = c_followerPos
+
+        #Publish status for the telemetry and the leader
         j = self._tripped
         if j is not None:
             state = "stopped"
@@ -335,142 +390,3 @@ class CollisionGuard:
         else:
             leader = m_leaderPos[j]
         return (leader - self._c_holdPos[j]) * self._trip_sign + self.resume_back_deg
-
-
-class LeaderLock:
-    """
-    The purpose of this class is to define how we freeze the leader arm when the follower arm has a collision. 
-    Every joint except for the trip one will be held in frozen split with torque on at that pose. 
-    The trip joint gets a one-way wall against the trip angle where the collision happens, so it can only go in the opposite direction. 
-    It basically springs against the wall, but moving the other way is free. There's one safeguard in place: you can still move the leader arm. 
-    It just has heavy resistance against any movement in any of the other directions. 
-
-    """
-
-    def __init__(self, leader, torque_pct=50, on_deg=0.5, off_deg=0.5, push_ma=150, lean_s=3.0,
-                 give_way_ma=700, avg_n=12):
-        self.leader = leader
-        self.bus = leader.bus
-        self.torque_pct = torque_pct    # holding strength while locked, % of max
-        self.on_deg = on_deg            # wall engages this far past the wall
-        self.off_deg = off_deg          # wall lets go this far back on the free side
-        self.push_ma = push_ma          # current that counts as leaning on a held joint
-        self.lean_s = lean_s            # seconds of leaning before a held joint lets go
-        self.give_way_ma = give_way_ma  # current at which a held joint lets go at once
-
-        self.motors = []
-        for m in self.bus.motors:
-            self.motors.append(m)
-
-        self.history = {}                 # recent current readings per joint
-        for m in self.motors:
-            self.history[m] = deque(maxlen=avg_n)
-
-        self._limits = None             # original Torque_Limit values, restored by close()
-        self.joint = None               # tripped joint while locked, else None
-        self.sign = 0                   # +1/-1: blocked direction of the tripped joint
-        self.c_wallPos = None           # angle of the one-way wall
-        self.engaged = set()            # joints with torque on
-        self.let_go = set()             # joints released by give-way / lean timeout
-        self._lean_since = {}           # joint -> time it started being leaned on
-
-    def start(self):
-        # Remember each joint's Torque_Limit, then cap it at torque_pct (1000 = 100%).
-        self._limits = {}
-        for m in self.motors:
-            self._limits[m] = self.bus.read("Torque_Limit", m, normalize=False)
-        for m in self.motors:
-            self.bus.write("Torque_Limit", m, int(self.torque_pct * 10), normalize=False)
-        return self
-
-    def close(self):
-        self.release()
-        if self._limits is not None:
-            for m in self._limits:
-                self.bus.write("Torque_Limit", m, self._limits[m], normalize=False)
-
-    def release(self):
-        # Every joint limp again.
-        if len(self.engaged) > 0:
-            self.bus.disable_torque(list(self.engaged))
-        if self.joint is not None:
-            logger.info("Leader unlocked")
-        self.engaged.clear()
-        self.let_go.clear()
-        self._lean_since.clear()
-        for m in self.motors:
-            self.history[m].clear()
-        self.joint = None
-
-    def _hold(self, motors, goals):
-        # Torque on for these joints, each held at its goal angle.
-        for m in motors:
-            self.bus.write("Goal_Position", m, goals[m])  # goal before torque, so nothing jumps
-        self.bus.enable_torque(list(motors))
-        for m in motors:
-            self.engaged.add(m)
-
-    def _free(self, m, reason=None, let_go=False):
-        # Torque off for one joint.
-        self.bus.disable_torque(m)
-        self.engaged.discard(m)
-        self.history[m].clear()
-        if m in self._lean_since:
-            del self._lean_since[m]
-        if let_go:
-            self.let_go.add(m)
-        if reason is not None:
-            logger.warning("Leader %s released: %s", m, reason)
-
-    def update(self, status, m_leaderPos, m_motorCurrent):
-        #checkt the status of the leader arm and updates the torque on each joint accordingly.
-        
-        stopped = status.get("state") == "stopped" and status.get("joint") is not None
-        # if not stopped leader joints should move freely
-        if not stopped:
-            if self.joint is not None:
-                self.release()
-            return
-
-        # if stopped lock all joints except the torqued out one in the opposite direction
-        if status["joint"] != self.joint:
-            self.release()
-            self.joint = status["joint"]
-            self.sign = status.get("direction")
-            if not self.sign:
-                self.sign = 1
-            self.c_wallPos = m_leaderPos[self.joint]
-            others = []
-            for m in self.motors:
-                if m != self.joint:
-                    others.append(m)
-            self._hold(others, m_leaderPos)
-            logger.warning("Leader locked: only %s can move, and only away from the collision", self.joint)
-
-        # Allows the leader to be pushed past the wall without breaking
-        now = time.monotonic()
-        for m in list(self.engaged):  # a copy, because _free() removes joints from engaged
-            self.history[m].append(current_ma(m_motorCurrent[m]))
-            m_currentAvg = sum(self.history[m]) / len(self.history[m])
-
-            if m_currentAvg > self.give_way_ma:
-                self._free(m, f"gave way at {m_currentAvg:.0f} mA", let_go=True)
-            else:
-                if m_currentAvg > self.push_ma:
-                    if m not in self._lean_since:
-                        self._lean_since[m] = now       # leaning started now
-                else:
-                    self._lean_since[m] = now           # not leaning: restart the clock
-                if now - self._lean_since[m] > self.lean_s:
-                    self._free(m, f"pushed for {self.lean_s:g} s", let_go=True)
-
-        # the one way wall for the over torqued joint
-        j = self.joint
-        past = (m_leaderPos[j] - self.c_wallPos) * self.sign  # >0 = pushed further into the collision
-        if j in self.let_go and past < -self.off_deg:
-            self.let_go.discard(j)  # back on the free side: the wall re-arms
-        if j in self.engaged:
-            if past < -self.off_deg:
-                self._free(j)  # moved back to the free side
-        elif j not in self.let_go and past > self.on_deg:
-            self._hold([j], {j: self.c_wallPos})  # pushed past the wall: spring back to it

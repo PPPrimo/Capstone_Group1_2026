@@ -7,8 +7,9 @@ import threading
 import time
 
 from RobotFiles.Drivers.LeaderArm import LeaderTeleopConfig, Leader
+from RobotFiles.Drivers.LeaderArm.LeaderLock import LeaderLock
 from RobotFiles.Drivers.FollowerArm import FollowerRobotConfig, Follower
-from RobotFiles.CollisionGuard import CollisionGuard, LeaderLock
+from RobotFiles.Drivers.FollowerArm.CollisionGuard import CollisionGuard
 
 
 k_readFreq = 100  # (Hz) rate the leader joints are read and the follower updated (RL-4.1)
@@ -18,7 +19,7 @@ stop_event = threading.Event()
 
 
 def get_all_states(device):
-    """Read position, velocity, and current for every motor on the bus."""
+    """Read position, velocity, and current in milliamps for every motor on the bus."""
     positions = device.get_position()
     velocities = device.get_velocity()
     currents = device.get_current()

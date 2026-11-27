@@ -1,5 +1,5 @@
 // Freezes the browser's leader arm (Web Serial) while the robot's follower is stopped by its collision guard.
-// Same behaviour as LeaderLock in RobotFiles/CollisionGuard.py, which does this for the Python leader:
+// Same behaviour as LeaderLock in RobotFiles/Drivers/LeaderArm/LeaderLock.py, which does this for the Python leader:
 //   - every leader joint except the tripped one is held where it was at the trip (torque on, goal = that pose)
 //   - the tripped joint gets a one-way wall at its trip angle: pushing further toward the obstacle switches its
 //     torque on so it springs back to the wall; moving the other way is free
